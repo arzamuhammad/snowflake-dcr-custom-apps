@@ -1,0 +1,8 @@
+# Snowflake App Runtime configuration.
+#
+# executeAsCaller is enabled so the app receives the caller's identity token in
+# the sf-context-current-user-token header. It is used ONLY for the audit trail:
+# every DCR call still runs with owner's rights, because business users must not
+# hold DCR privileges directly.
+runtime:
+  executeAsCaller: true

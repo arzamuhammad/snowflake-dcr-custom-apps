@@ -1,0 +1,28 @@
+definition_version: "2"
+
+entities:
+  dcr_console:
+    type: snowflake-app
+    identifier:
+      name: DCR_OVERLAP_CONSOLE_WEB
+      # SAR-enabled database, created during the App Runtime admin setup.
+      database: SNOWFLAKE_APPS
+      schema: PUBLIC
+    meta:
+      title: DCR Audience Overlap Console
+    artifacts:
+      - src: ./*
+        dest: ./
+        ignore:
+          - node_modules
+          - .env*
+          - .next
+          - .git
+          - __pycache__
+          - "*.pyc"
+          - snowflake.log
+          - output
+    # Warehouse used for all DCR facade calls.
+    query_warehouse: APP_WH
+    code_stage:
+      name: DCR_CONSOLE_WEB_CODE
