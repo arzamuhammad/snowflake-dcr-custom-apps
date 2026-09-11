@@ -114,6 +114,36 @@ def decode_error(raw: str) -> dict[str, Any]:
             "severity": "error",
         }
 
+    # -- Secondary roles active ----------------------------------------------
+    # DCR refuses to run REGISTER_DATA_OFFERING (and other REGISTRY/COLLABORATION
+    # procedures) while the session has secondary roles enabled, because it cannot
+    # determine which role is granting access to the underlying data.
+    #
+    # The facade cannot fix this itself: the remedy is USE SECONDARY ROLES NONE,
+    # a USE statement, and those are rejected inside a stored procedure. So this
+    # has to be set on the session before INVOKE is called. Both UIs do that at
+    # startup; reaching this branch means it did not take effect.
+    if "SecondaryRolesNotSupported" in msg or "Secondary roles must be disabled" in msg:
+        return {
+            "code": "SECONDARY_ROLES_ACTIVE",
+            "title": "Secondary roles must be disabled for this operation",
+            "cause": (
+                "Data Clean Rooms refuses to register or link data while the session has "
+                "secondary roles enabled, because the effective privilege set is then "
+                "ambiguous. The session that called the console still has them active."
+            ),
+            "remediation": (
+                "Run USE SECONDARY ROLES NONE on the session, then retry. This cannot be "
+                "done inside DCR_CONSOLE.APP.INVOKE — USE is not a permitted statement in "
+                "a stored procedure — so both UIs issue it at session level on startup. "
+                "If you are seeing this in an app, reload the page to re-run startup; if "
+                "you are calling INVOKE from a worksheet, run the statement yourself first."
+            ),
+            "sql_fix": "USE SECONDARY ROLES NONE;",
+            "retryable": True,
+            "severity": "blocked",
+        }
+
     # -- Missing REFERENCE_USAGE on the shared database ----------------------
     # Two variants: plain REFERENCE_USAGE (JOIN) and WITH GRANT OPTION
     # (REGISTER/LINK). DCR names the database, and sometimes the SCO share.

@@ -16,6 +16,33 @@ from snowflake.snowpark.context import get_active_session
 
 
 def _session():
+    return _prepared_session()
+
+
+@st.cache_resource(show_spinner=False)
+def _secondary_roles_disabled() -> str:
+    """Disable secondary roles once per Streamlit session.
+
+    Data Clean Rooms refuses REGISTER_DATA_OFFERING and the link operations while
+    secondary roles are active. The fix is USE SECONDARY ROLES NONE, which cannot
+    live inside DCR_CONSOLE.APP.INVOKE because USE is not a permitted statement in
+    a stored procedure. It therefore has to be issued here, at session level,
+    before any facade call.
+
+    Cached so it runs once rather than on every Streamlit rerun. Failures are
+    swallowed deliberately: a session that cannot run USE at all (a restricted
+    token, for example) may still have no secondary roles to begin with, and the
+    decoder reports SECONDARY_ROLES_ACTIVE with the exact remedy if it matters.
+    """
+    try:
+        get_active_session().sql("USE SECONDARY ROLES NONE").collect()
+        return "disabled"
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return f"unavailable: {exc}"
+
+
+def _prepared_session():
+    _secondary_roles_disabled()
     return get_active_session()
 
 

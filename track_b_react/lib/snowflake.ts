@@ -264,12 +264,43 @@ function getTomlPool(conn: TomlConnection): ReturnType<typeof snowflake.createPo
   return tomlPool
 }
 
+// --- Secondary roles ---
+//
+// Data Clean Rooms refuses REGISTER_DATA_OFFERING and the link operations while
+// the session has secondary roles enabled. The remedy is USE SECONDARY ROLES
+// NONE, which cannot live inside DCR_CONSOLE.APP.INVOKE because USE is not a
+// permitted statement in a stored procedure. It has to be issued on the
+// connection instead.
+//
+// Pooled connections are long-lived and reused, so this is tracked per
+// connection rather than run before every query. A WeakSet lets the entries
+// disappear when the pool destroys the connection.
+const secondaryRolesDisabled = new WeakSet<object>()
+
+function disableSecondaryRoles(conn: snowflake.Connection): Promise<void> {
+  if (secondaryRolesDisabled.has(conn as unknown as object)) return Promise.resolve()
+  return new Promise((resolve) => {
+    conn.execute({
+      sqlText: "USE SECONDARY ROLES NONE",
+      complete: (err) => {
+        // Deliberately resolves either way. A session that cannot run USE at all
+        // may equally have no secondary roles to disable, and failing the whole
+        // request here would turn a non-problem into an outage. If it did matter,
+        // the facade's error decoder reports SECONDARY_ROLES_ACTIVE with the fix.
+        if (!err) secondaryRolesDisabled.add(conn as unknown as object)
+        resolve()
+      },
+    })
+  })
+}
+
 function queryWithPool(
   pool: ReturnType<typeof snowflake.createPool>,
   query: string,
   binds?: any[],
 ): Promise<Record<string, any>[]> {
   return pool.use(async (conn) => {
+    await disableSecondaryRoles(conn)
     return new Promise<Record<string, any>[]>((res, rej) => {
       conn.execute({
         sqlText: query,
@@ -297,8 +328,9 @@ function queryWithPool(
 function connectAndQuery(config: snowflake.ConnectionOptions, query: string): Promise<Record<string, any>[]> {
   const conn = snowflake.createConnection(config)
   return new Promise((resolve, reject) => {
-    conn.connect((err) => {
+    conn.connect(async (err) => {
       if (err) return reject(new Error(`Snowflake connection failed: ${err.message}`))
+      await disableSecondaryRoles(conn)
       conn.execute({
         sqlText: query,
         complete: (err, _stmt, rows) => {

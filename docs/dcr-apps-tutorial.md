@@ -688,6 +688,7 @@ terpengaruh karena semuanya ada di `DCR_CONSOLE.META`, bukan di dalam container.
 
 | Gejala | Penyebab | Solusi |
 |---|---|---|
+| `SecondaryRolesNotSupported: Secondary roles must be disabled` saat register / link | Sesi masih mengaktifkan secondary roles. DCR menolak karena privilege efektifnya jadi ambigu | Jalankan `USE SECONDARY ROLES NONE` di **level sesi**, lalu ulangi. Ini **tidak bisa** ditaruh di dalam `INVOKE` — `USE` dilarang di stored procedure. Kedua UI sudah melakukannya saat startup, jadi cukup reload halaman |
 | URL app 404 atau tidak bisa diakses | Grant `BIND SERVICE ENDPOINT` hilang | `GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE <role>;` lalu deploy ulang |
 | Deploy gagal "warehouse not found" | `snowflake.yml` menunjuk warehouse yang tidak ada | Edit `query_warehouse:` |
 | Deploy gagal permission | App Runtime setup belum selesai | Snowsight → Settings → Account → Apps → Begin Setup |
@@ -1108,13 +1109,17 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 
 | Aman di dalam procedure | Tidak aman |
 |---|---|
-| `REGISTER_DATA_OFFERING` | **`COLLABORATION.JOIN`** — memanggil `SYSTEM$ACCEPT_LEGAL_TERMS` |
+| `REGISTER_DATA_OFFERING` * | **`COLLABORATION.JOIN`** — memanggil `SYSTEM$ACCEPT_LEGAL_TERMS` |
 | `INITIALIZE` | **`ADMIN.CHECK_PRIVILEGES`** — menjalankan statement `USE` |
-| `LINK_DATA_OFFERING`, `LINK_LOCAL_DATA_OFFERING` | |
+| `LINK_DATA_OFFERING`, `LINK_LOCAL_DATA_OFFERING` * | **`USE SECONDARY ROLES NONE`** — statement `USE` |
 | `RUN` (overlap dan aktivasi) | |
 | `VIEW_*` (semua) | |
 | `PROCESS_ACTIVATION` | |
 | `TEARDOWN`, `LEAVE`, `GET_STATUS` | |
+
+\* Aman untuk *dijalankan* di dalam procedure, tapi menuntut sesi pemanggilnya
+sudah mematikan secondary roles. Jadi prasyaratnya berada di luar façade
+meskipun operasinya sendiri di dalam. Lihat baris `USE SECONDARY ROLES NONE`.
 
 Yang tidak aman harus dijalankan **di level sesi** oleh lapisan UI. Di Streamlit
 in Snowflake ini otomatis. Di React/SPCS, handler API harus memanggil `CALL`

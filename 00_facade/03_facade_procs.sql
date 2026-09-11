@@ -5,13 +5,22 @@
 -- explicit whitelist, never getattr on a caller-supplied name.
 --
 -- Collaboration API v2 only.
+--
+-- NOTE ON QUOTING. The Python body below is a single-quoted SQL string, which is
+-- the form GET_DDL emits, and every apostrophe inside it is doubled. Do not
+-- "tidy" this into a $$ ... $$ block while leaving the surrounding quotes in
+-- place: the body would then begin with a literal ' and Snowflake, which
+-- compile-checks Python at CREATE time, rejects it with
+-- "SyntaxError: unterminated string literal". This file was broken that way once.
+--
+-- Upload the four library modules to @DCR_CONSOLE.APP.LIB before running this.
 -- ============================================================================
 
 USE ROLE ACCOUNTADMIN;
 USE DATABASE DCR_CONSOLE;
 USE SCHEMA APP;
 
-CREATE OR REPLACE PROCEDURE DCR_CONSOLE.APP.INVOKE(OPERATION STRING, PAYLOAD VARIANT)
+CREATE OR REPLACE PROCEDURE DCR_CONSOLE.APP.INVOKE("OPERATION" VARCHAR, "PAYLOAD" VARIANT)
 RETURNS VARIANT
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
@@ -20,9 +29,7 @@ HANDLER = 'main'
 IMPORTS = ('@DCR_CONSOLE.APP.LIB/dcr_specs.py','@DCR_CONSOLE.APP.LIB/dcr_errors.py','@DCR_CONSOLE.APP.LIB/dcr_facade.py','@DCR_CONSOLE.APP.LIB/dcr_runs.py')
 COMMENT='Single entry point for the DCR Audience Overlap Console. See OPERATIONS for the whitelist.'
 EXECUTE AS OWNER
-AS
-$$
-
+AS '
 import json
 
 import dcr_facade as f
@@ -112,10 +119,10 @@ def main(session, operation, payload):
             "operation": op,
             "error": {
                 "code": "UNKNOWN_OPERATION",
-                "title": f"'{op}' is not a facade operation",
+                "title": f"''{op}'' is not a facade operation",
                 "cause": "The operation name is not in the whitelist.",
-                "remediation": (f"Did you mean: {', '.join(close)}? " if close else "")
-                               + "Call INVOKE('LIST_OPERATIONS', NULL) for the full list.",
+                "remediation": (f"Did you mean: {'', ''.join(close)}? " if close else "")
+                               + "Call INVOKE(''LIST_OPERATIONS'', NULL) for the full list.",
                 "sql_fix": None,
                 "retryable": False,
                 "severity": "error",
@@ -139,7 +146,7 @@ def main(session, operation, payload):
                     "code": "INVALID_PAYLOAD",
                     "title": "Payload is not valid JSON",
                     "cause": "The payload string could not be parsed as a JSON object.",
-                    "remediation": "Pass an OBJECT_CONSTRUCT(...) or PARSE_JSON('{...}') value.",
+                    "remediation": "Pass an OBJECT_CONSTRUCT(...) or PARSE_JSON(''{...}'') value.",
                     "sql_fix": None, "retryable": False, "severity": "error",
                 },
             }
@@ -155,10 +162,10 @@ def main(session, operation, payload):
             "ok": False, "operation": op,
             "error": {
                 "code": "MISSING_ARGUMENT",
-                "title": f"{op} is missing: {', '.join(missing)}",
-                "cause": f"{op} requires {', '.join(required) or 'no arguments'}.",
-                "remediation": f"Add {', '.join(missing)} to the payload. "
-                               f"Optional arguments: {', '.join(optional) or 'none'}.",
+                "title": f"{op} is missing: {'', ''.join(missing)}",
+                "cause": f"{op} requires {'', ''.join(required) or ''no arguments''}.",
+                "remediation": f"Add {'', ''.join(missing)} to the payload. "
+                               f"Optional arguments: {'', ''.join(optional) or ''none''}.",
                 "sql_fix": None, "retryable": False, "severity": "error",
             },
         }
@@ -170,7 +177,6 @@ def main(session, operation, payload):
 
     return fn(session, ui_track=ui_track, **call_args)
 ';
-$$;
 
 -- Production: the console role must own this so it executes with DCR_CONSOLE_ROLE
 -- privileges. NOTE: the role that owns this must also be the role that JOINed

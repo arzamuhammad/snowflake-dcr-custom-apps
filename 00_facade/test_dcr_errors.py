@@ -43,6 +43,20 @@ REAL_NESTED_JOIN = (
     "[SYSTEM$ACCEPT_LEGAL_TERMS]."
 )
 
+# Captured from the Streamlit console when registering an offering while the
+# session still had secondary roles enabled.
+REAL_SECONDARY_ROLES = (
+    "(1304): 01c6fdc3-0001-a065-0000-04dd0dbc865e: 100357 (P0000): "
+    "Python Interpreter Error:\n"
+    "Traceback (most recent call last):\n"
+    '  File "_udf_code.py", line 23, in main\n'
+    "    raise e.with_traceback(None) from None\n"
+    "navlib.app.collaboration.exceptions.SecondaryRolesNotSupported: "
+    "Secondary roles must be disabled before calling this procedure. "
+    "Run 'USE SECONDARY ROLES NONE' and try again.\n"
+    " in function REGISTER_DATA_OFFERING with handler main"
+)
+
 # Captured when LINK_LOCAL_DATA_OFFERING lacked WITH GRANT OPTION.
 REAL_GRANT_NOT_EXECUTED = (
     "Exception: **FAILURE**: Received error, observed: 003102 (42501): "
@@ -185,9 +199,31 @@ def test_grant_not_executed_survives_decoding():
     assert "Grant not executed" in out["cause"] or out["code"] != "UNKNOWN"
 
 
+def test_secondary_roles_error_is_classified_with_the_exact_remedy():
+    """This one reached a user as "Unrecognised", which is how it got a case.
+
+    The remedy is a single statement, so the decoder must surface it as sql_fix
+    rather than leaving the operator to read a Python traceback.
+    """
+    out = decode_error(REAL_SECONDARY_ROLES)
+    assert out["code"] == "SECONDARY_ROLES_ACTIVE"
+    assert out["sql_fix"] == "USE SECONDARY ROLES NONE;"
+    assert out["retryable"] is True
+
+
+def test_secondary_roles_remediation_says_why_the_facade_cannot_self_heal():
+    """USE is rejected inside a stored procedure, so the fix is session-level.
+
+    If this explanation is lost, the obvious "fix" is to add the statement to
+    INVOKE, which cannot work.
+    """
+    out = decode_error(REAL_SECONDARY_ROLES)
+    assert "stored procedure" in out["remediation"]
+
+
 def test_every_decoded_error_has_the_full_contract():
     """The UI renders these keys unconditionally, so none may be missing."""
     required = {"code", "title", "cause", "remediation", "sql_fix", "retryable", "severity"}
     for raw in [REAL_REFERENCE_USAGE, REAL_RESTRICTED_SESSION, REAL_NESTED_JOIN,
-                REAL_GRANT_NOT_EXECUTED, "novel error", ""]:
+                REAL_GRANT_NOT_EXECUTED, REAL_SECONDARY_ROLES, "novel error", ""]:
         assert required <= set(decode_error(raw))

@@ -213,6 +213,7 @@ Learned the hard way while building this; all six are handled in the code.
 
 | Trap | Consequence |
 |---|---|
+| Secondary roles are enabled on the session | DCR refuses to register or link data. `USE SECONDARY ROLES NONE` fixes it — but `USE` is barred inside a procedure, so it must be set on the session. Both UIs do this at startup |
 | `COLLABORATION.JOIN` is side-effecting | Cannot run in a stored procedure; must be session level |
 | Auto-join can fail **silently** | Status stays `CREATED` with `auto_join.phase = failed` in `DETAILS` |
 | `SHARED_WITH` is the local/partner discriminator | View-name prefix is *not* reliable — in a single-account test both get `PROVIDER.` |

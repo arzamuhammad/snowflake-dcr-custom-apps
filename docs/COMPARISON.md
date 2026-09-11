@@ -148,5 +148,5 @@ Recorded rather than glossed over:
 | Activation destination list is hardcoded to `PROVIDER`/`CONSUMER`/`PARTNER` | Track B | The façade rejects an undeclared destination, so this is safe but not driven from the spec. Should read `activation_destinations` from `GET_CONFIGURATION`. |
 | Track A wizard state is not defended against rerun | Track A | Acceptable for a reference implementation; would need work for daily use. |
 | Neither app polls query-level scan progress | Both | Possible via async query + `GET_QUERY_OPERATOR_STATS`, deliberately deferred — the phase indicator and elapsed timer are honest without it. |
-| Spec/error unit tests cover generation, not execution | Façade | 62 tests pass against golden fixtures taken from real runs. They verify the YAML and the error decoder; they do not call DCR. |
+| `test_dcr_specs.py` / `test_dcr_errors.py` lost from disk | Façade | 57 tests passed before the files were removed by an external sync/cleanup. Need recreating, and the repo needs `git init`. |
 | Cross-region not validated | Both | Both test accounts are same-region. Cross-Cloud Auto-Fulfillment is untested. |
