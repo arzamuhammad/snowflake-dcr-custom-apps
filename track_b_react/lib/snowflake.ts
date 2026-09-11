@@ -275,20 +275,85 @@ function getTomlPool(conn: TomlConnection): ReturnType<typeof snowflake.createPo
 // Pooled connections are long-lived and reused, so this is tracked per
 // connection rather than run before every query. A WeakSet lets the entries
 // disappear when the pool destroys the connection.
-const secondaryRolesDisabled = new WeakSet<object>()
+const sessionPrepared = new WeakSet<object>()
 
-function disableSecondaryRoles(conn: snowflake.Connection): Promise<void> {
-  if (secondaryRolesDisabled.has(conn as unknown as object)) return Promise.resolve()
+/** Run one statement, resolving whether or not it succeeded. */
+function trySql(conn: snowflake.Connection, sqlText: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    conn.execute({ sqlText, complete: (err) => resolve(!err) })
+  })
+}
+
+/**
+ * Bring a fresh connection into the state DCR requires.
+ *
+ * Two statements, both of which must run at session level because `USE` is not a
+ * permitted statement inside a stored procedure:
+ *
+ *   USE SECONDARY ROLES NONE  — DCR refuses REGISTER_DATA_OFFERING and the link
+ *     operations while secondary roles are active, because the effective
+ *     privilege set is then ambiguous.
+ *
+ *   USE WAREHOUSE <w>         — a caller's-rights session inherits the caller's
+ *     DEFAULT_WAREHOUSE, which is frequently null. Owner's-rights calls get the
+ *     app's query_warehouse, so this only bites the caller path, which is the
+ *     one JOIN uses.
+ *
+ * Failures are swallowed on purpose. A session that cannot run `USE` at all may
+ * equally have nothing to change, and failing the request here would turn a
+ * non-problem into an outage. When it does matter the error decoder reports
+ * SECONDARY_ROLES_ACTIVE or a missing-warehouse error with the real cause.
+ */
+async function prepareSession(conn: snowflake.Connection): Promise<void> {
+  const key = conn as unknown as object
+  if (sessionPrepared.has(key)) return
+
+  await trySql(conn, "USE SECONDARY ROLES NONE")
+  await ensureWarehouse(conn)
+
+  sessionPrepared.add(key)
+}
+
+/**
+ * Remembered warehouse name, learned from whichever session already had one.
+ *
+ * Owner's-rights connections inherit the app's query_warehouse, so they always
+ * have one. Caller's-rights connections inherit the caller's DEFAULT_WAREHOUSE,
+ * which is frequently null — and a session with no warehouse cannot run JOIN.
+ * Rather than require extra configuration that could drift from snowflake.yml,
+ * the first session that reports a warehouse teaches the rest of the process
+ * which one to use.
+ */
+let knownWarehouse: string | null = null
+
+const WAREHOUSE_NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/
+
+async function ensureWarehouse(conn: snowflake.Connection): Promise<void> {
+  const configured = process.env.SNOWFLAKE_WAREHOUSE ?? process.env.SNOWFLAKE_QUERY_WAREHOUSE
+  if (configured && WAREHOUSE_NAME.test(configured)) {
+    knownWarehouse = configured
+  }
+
+  const current = await currentWarehouse(conn)
+  if (current) {
+    knownWarehouse = current
+    return
+  }
+
+  if (knownWarehouse) {
+    await trySql(conn, `USE WAREHOUSE ${knownWarehouse}`)
+  }
+}
+
+function currentWarehouse(conn: snowflake.Connection): Promise<string | null> {
   return new Promise((resolve) => {
     conn.execute({
-      sqlText: "USE SECONDARY ROLES NONE",
-      complete: (err) => {
-        // Deliberately resolves either way. A session that cannot run USE at all
-        // may equally have no secondary roles to disable, and failing the whole
-        // request here would turn a non-problem into an outage. If it did matter,
-        // the facade's error decoder reports SECONDARY_ROLES_ACTIVE with the fix.
-        if (!err) secondaryRolesDisabled.add(conn as unknown as object)
-        resolve()
+      sqlText: "SELECT CURRENT_WAREHOUSE() AS W",
+      complete: (err, _stmt, rows) => {
+        if (err || !rows?.length) return resolve(null)
+        const w = (rows[0] as Record<string, unknown>).W
+        const name = w == null ? "" : String(w).trim()
+        resolve(name && WAREHOUSE_NAME.test(name) ? name : null)
       },
     })
   })
@@ -300,7 +365,7 @@ function queryWithPool(
   binds?: any[],
 ): Promise<Record<string, any>[]> {
   return pool.use(async (conn) => {
-    await disableSecondaryRoles(conn)
+    await prepareSession(conn)
     return new Promise<Record<string, any>[]>((res, rej) => {
       conn.execute({
         sqlText: query,
@@ -330,7 +395,7 @@ function connectAndQuery(config: snowflake.ConnectionOptions, query: string): Pr
   return new Promise((resolve, reject) => {
     conn.connect(async (err) => {
       if (err) return reject(new Error(`Snowflake connection failed: ${err.message}`))
-      await disableSecondaryRoles(conn)
+      await prepareSession(conn)
       conn.execute({
         sqlText: query,
         complete: (err, _stmt, rows) => {
