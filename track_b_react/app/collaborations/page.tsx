@@ -18,10 +18,10 @@
 
 import { useEffect, useState } from "react";
 
-import { createCollaboration, ensureJoined, getStatus, healthCheck, listOfferings } from "@/lib/facade";
+import { createCollaboration, getStatus, healthCheck, listOfferings } from "@/lib/facade";
 import type { DcrError } from "@/lib/types";
 
-import { Alert, Card, ErrorPanel, PageHeader, Spinner, StatusBadge } from "@/components/ui";
+import { Alert, Card, CopyBlock, ErrorPanel, PageHeader, Spinner, StatusBadge } from "@/components/ui";
 
 interface Collaborator {
   alias: string;
@@ -49,8 +49,6 @@ export default function CreateCollaborationPage() {
   const [runners, setRunners] = useState<Runner[]>([
     { alias: "CONSUMER", providerAlias: "PROVIDER", offerings: [], destinations: ["CONSUMER"] },
   ]);
-  const [autoJoin, setAutoJoin] = useState(true);
-  const [warehouse, setWarehouse] = useState("APP_WH");
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<DcrError | null>(null);
@@ -107,7 +105,7 @@ export default function CreateCollaborationPage() {
     setBusy(true);
     setError(null);
     setCreated(null);
-    const r = await createCollaboration(buildConfig(), autoJoin ? warehouse : undefined);
+    const r = await createCollaboration(buildConfig());
     if (r.ok) {
       setCreated(r.data.collaboration_name);
       poll(r.data.collaboration_name);
@@ -119,23 +117,25 @@ export default function CreateCollaborationPage() {
   }
 
   /**
-   * Poll to JOINED.
+   * Poll the collaborators' statuses.
    *
-   * ENSURE_JOINED is used rather than plain GET_STATUS because auto-join is best
-   * effort: the task can fail while INITIALIZE reports success, leaving the
-   * collaboration at CREATED with the failure buried in the DETAILS blob.
-   * ENSURE_JOINED detects that and calls JOIN.
+   * Read-only on purpose. Earlier this called ENSURE_JOINED when it saw a stalled
+   * CREATED, but joining cannot succeed from here at all: it accepts legal terms,
+   * which requires a user profile the app's service identity cannot have. The
+   * screen reports what it sees and hands over the SQL instead.
+   *
+   * Matching is exact. "JOINED" as a substring also matches "JOINING", which is
+   * how a still-provisioning collaboration gets mistaken for a finished one.
    */
   async function poll(collab: string) {
     setPolling(true);
     for (let i = 0; i < 30; i++) {
       const s = await getStatus(collab);
-      if (s.ok) setStatusRows(s.data.status);
-      const text = JSON.stringify(s.ok ? s.data.status : "").toUpperCase();
-      if (text.includes("JOINED")) break;
-      if (text.includes("CREATED") && !text.includes("JOINING")) {
-        await ensureJoined(collab);
-      }
+      if (!s.ok) break;
+      setStatusRows(s.data.status);
+      const states = s.data.status.map((r) => String(r.STATUS ?? "").trim().toUpperCase());
+      if (states.length && states.every((st) => st === "JOINED")) break;
+      if (states.some((st) => st.endsWith("_FAILED"))) break;
       await new Promise((res) => setTimeout(res, 15000));
     }
     setPolling(false);
@@ -253,26 +253,39 @@ export default function CreateCollaborationPage() {
             </div>
 
             <div className="field">
-              <label>Offerings that provider shares to this runner</label>
-              <select
-                multiple
-                size={Math.min(5, Math.max(3, offeringIds.length))}
-                value={r.offerings}
-                onChange={(e) =>
-                  setRunners((p) =>
-                    p.map((x, j) =>
-                      j === i
-                        ? { ...x, offerings: Array.from(e.target.selectedOptions, (o) => o.value) }
-                        : x,
-                    ),
-                  )
-                }
-              >
-                {offeringIds.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-              <div className="hint">
-                Leave empty as a placeholder if the data is registered later.
+              <label>Offerings that <strong>{r.providerAlias}</strong> shares to <strong>{r.alias}</strong></label>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                Select only the offerings this runner should see. Hold <kbd>Ctrl</kbd> (or <kbd>Cmd</kbd>) to
+                pick individual items. If nothing is selected, the provider is added with an empty list
+                (you can link offerings later).
               </div>
+              {offeringIds.length === 0 ? (
+                <div className="muted">No offerings registered yet. Register data on the My Data page first.</div>
+              ) : (
+                <>
+                  <select
+                    multiple
+                    size={Math.min(5, Math.max(3, offeringIds.length))}
+                    value={r.offerings}
+                    onChange={(e) =>
+                      setRunners((p) =>
+                        p.map((x, j) =>
+                          j === i
+                            ? { ...x, offerings: Array.from(e.target.selectedOptions, (o) => o.value) }
+                            : x,
+                        ),
+                      )
+                    }
+                  >
+                    {offeringIds.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                    {r.offerings.length === 0
+                      ? "None selected — provider will be added with an empty offering list."
+                      : `${r.offerings.length} selected: ${r.offerings.join(", ")}`}
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="field">
@@ -332,16 +345,14 @@ export default function CreateCollaborationPage() {
       </Card>
 
       <Card title="4. Review and create">
-        <label className="checkbox-row">
-          <input type="checkbox" checked={autoJoin} onChange={(e) => setAutoJoin(e.target.checked)} />
-          Auto-join as owner (recommended)
-        </label>
-        {autoJoin ? (
-          <div className="field" style={{ maxWidth: 260, marginTop: 8 }}>
-            <label>Warehouse for the auto-join task</label>
-            <input value={warehouse} onChange={(e) => setWarehouse(e.target.value)} />
-          </div>
-        ) : null}
+        <Alert kind="warn" title="You must join manually after this completes">
+          Auto-join is not offered, because it does not work: the owner&apos;s join runs inside a
+          background task, and <code>SYSTEM$ACCEPT_LEGAL_TERMS</code> cannot be called from a stored
+          procedure. It fails and leaves the collaboration at <code>INSTALLATION_FAILED</code>.
+          Joining also requires a user profile with first name, last name and email, which a service
+          identity cannot have — so it has to be a person, in a worksheet. The SQL appears below once
+          the collaboration is created.
+        </Alert>
 
         <details style={{ marginTop: 12 }}>
           <summary>Preview the configuration sent to the facade</summary>
@@ -383,11 +394,35 @@ export default function CreateCollaborationPage() {
               </table>
             </div>
           ) : null}
-          <Alert kind="info" title="If the status stays at CREATED">
-            Auto-join can fail silently — the task fails while INITIALIZE reports success. This page
-            calls <code>ENSURE_JOINED</code> automatically when it sees that state, which performs
-            the JOIN for you.
+          <Alert kind="warn" title="Now join as the owner — this app cannot do it">
+            The collaboration exists, but you are not in it until you join, and joining accepts
+            legal terms on your behalf. Snowflake only allows an identifiable user to do that, so it
+            has to be run by a person whose profile has first name, last name and email set. Run
+            this in a Snowsight worksheet, then have your partner accept their invitation the same
+            way.
           </Alert>
+
+          <CopyBlock
+            label="Run once as the owner"
+            sql={[
+              "USE ROLE ACCOUNTADMIN;",
+              "USE WAREHOUSE APP_WH;",
+              "USE SECONDARY ROLES NONE;",
+              "",
+              `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('${created}');`,
+              "",
+              "-- Poll until every row reads exactly JOINED (JOINING means still working):",
+              `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('${created}');`,
+            ].join("\n")}
+          />
+
+          <div className="hint" style={{ marginTop: 8 }}>
+            If the status reaches <code>INSTALLATION_FAILED</code>, read the <code>DETAILS</code>{" "}
+            column. An incomplete user profile and a nested{" "}
+            <code>SYSTEM$ACCEPT_LEGAL_TERMS</code> are the two causes seen in practice. Recover by
+            calling <code>REVIEW</code> again and then <code>JOIN</code> — <code>LEAVE</code> is
+            rejected from that state.
+          </div>
         </Card>
       ) : null}
     </>

@@ -213,6 +213,9 @@ Learned the hard way while building this; all six are handled in the code.
 
 | Trap | Consequence |
 |---|---|
+| Joining requires an identifiable *person* | `JOIN` accepts legal terms, so DCR demands `first_name`, `last_name` and `email` on the acting user. An SPCS service identity is not a user object and cannot have them; a business user has them but deliberately lacks `SAMOOHA_APP_ROLE`. **No app can join** — it is a one-time admin act in a worksheet |
+| Owner auto-join does not work | The DCR auto-join task runs `JOIN` inside a procedure, so it dies on `SYSTEM$ACCEPT_LEGAL_TERMS` and leaves the collaboration at `INSTALLATION_FAILED` |
+| `LEAVE` is rejected from `INSTALLATION_FAILED` | Recover with `REVIEW` again, then `JOIN`. `LEAVE` only works from `LOCAL_DROP_PENDING` / `LEAVING` |
 | Secondary roles are enabled on the session | DCR refuses to register or link data. `USE SECONDARY ROLES NONE` fixes it — but `USE` is barred inside a procedure, so it must be set on the session. Both UIs do this at startup |
 | `COLLABORATION.JOIN` is side-effecting | Cannot run in a stored procedure; must be session level |
 | Auto-join can fail **silently** | Status stays `CREATED` with `auto_join.phase = failed` in `DETAILS` |

@@ -112,6 +112,10 @@ export const getStatus = (collaboration: string) =>
  * Necessary because auto-join is best effort: the task can fail while INITIALIZE
  * reports success, leaving the collaboration stuck at CREATED with the failure
  * buried in the status DETAILS blob.
+ *
+ * NOT CALLED BY THE UI. It cannot help from a deployed app, because the JOIN it
+ * performs needs an identifiable user — see reviewAndJoin below for the full
+ * reasoning. Retained for scripted use by an operator who has the privileges.
  */
 export const ensureJoined = (collaboration: string) =>
   invoke<{ action: string; joined: boolean; keep_polling: boolean }>("ENSURE_JOINED", {
@@ -217,9 +221,18 @@ export const setAppRole = (username: string, app_role: string, notes?: string) =
  * SYSTEM$ACCEPT_LEGAL_TERMS. Snowflake refuses side-effecting functions inside a
  * stored procedure, so this bypasses DCR_CONSOLE.APP.INVOKE by design.
  *
- * Consequence worth knowing: the role that runs JOIN OWNS the objects the join
- * creates (SFDCR_<collab> and SFDCR_LOCAL_<collab>). Letting the app do it keeps
- * ownership with the app's role and avoids a later grant-adoption exercise.
+ * NOT CALLED BY THE UI, deliberately — and not dead code either. Accepting legal
+ * terms additionally requires the acting user to have first_name, last_name and
+ * email. A deployed app has neither option available: owner's rights acts as an
+ * SPCS managed service identity, which is not a user object and cannot be given
+ * a profile, while caller's rights acts as a business user who deliberately does
+ * not hold SAMOOHA_APP_ROLE. So the Invitations page shows copy-ready SQL
+ * instead, and this stays as a working path for an operator who holds both the
+ * profile and the privileges.
+ *
+ * Consequence worth knowing if you do use it: the role that runs JOIN OWNS the
+ * objects the join creates (SFDCR_<collab> and SFDCR_LOCAL_<collab>), which
+ * determines who can link and run later.
  */
 export const reviewAndJoin = (args: {
   source_name: string;

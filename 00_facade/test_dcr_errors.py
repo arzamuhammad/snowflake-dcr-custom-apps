@@ -57,6 +57,23 @@ REAL_SECONDARY_ROLES = (
     " in function REGISTER_DATA_OFFERING with handler main"
 )
 
+# Captured from GET_STATUS DETAILS after the React app's service identity tried
+# to JOIN on the consumer account.
+REAL_USER_PROFILE_INCOMPLETE = (
+    "**FAILURE**: Received error: snowflake.snowpark.exceptions.SnowparkSQLException: "
+    "(1304): 01c6fe42-0001-a065-0000-31d5083915fe: 090655 (P0002): "
+    "Please add your first/last name and email to your user profile in the Snowsight UI "
+    "or use the SQL command ALTER USER <user name> to set first_name, last_name, and email."
+)
+
+# Captured when LEAVE was attempted to recover a failed install.
+REAL_WRONG_STATUS = (
+    "navlib.app.collaboration.exceptions.InvalidCollaborationStatusError: This action "
+    "requires the collaboration status to be one of the following: LOCAL_DROP_PENDING, "
+    "LEAVING. Current status: INSTALLATION_FAILED.\n"
+    " in function LEAVE with handler main"
+)
+
 # Captured when LINK_LOCAL_DATA_OFFERING lacked WITH GRANT OPTION.
 REAL_GRANT_NOT_EXECUTED = (
     "Exception: **FAILURE**: Received error, observed: 003102 (42501): "
@@ -221,9 +238,36 @@ def test_secondary_roles_remediation_says_why_the_facade_cannot_self_heal():
     assert "stored procedure" in out["remediation"]
 
 
+def test_incomplete_user_profile_is_classified_and_names_alter_user():
+    out = decode_error(REAL_USER_PROFILE_INCOMPLETE)
+    assert out["code"] == "USER_PROFILE_INCOMPLETE"
+    assert "ALTER USER" in (out["sql_fix"] or "")
+
+
+def test_incomplete_user_profile_says_to_join_outside_the_app():
+    """The point that saves the next person hours.
+
+    A service identity cannot be given a profile, so retrying in the app can
+    never work. If the remediation loses this, the obvious next step is to hunt
+    for a grant that does not exist.
+    """
+    out = decode_error(REAL_USER_PROFILE_INCOMPLETE)
+    assert "worksheet" in out["remediation"]
+    assert out["retryable"] is False
+
+
+def test_failed_install_recovery_is_review_then_join_not_leave():
+    """LEAVE is rejected from INSTALLATION_FAILED, which is counter-intuitive."""
+    out = decode_error(REAL_WRONG_STATUS)
+    assert out["code"] == "WRONG_COLLABORATION_STATUS"
+    assert "INSTALLATION_FAILED" in out["title"]
+    assert "REVIEW" in out["remediation"] and "JOIN" in out["remediation"]
+
+
 def test_every_decoded_error_has_the_full_contract():
     """The UI renders these keys unconditionally, so none may be missing."""
     required = {"code", "title", "cause", "remediation", "sql_fix", "retryable", "severity"}
     for raw in [REAL_REFERENCE_USAGE, REAL_RESTRICTED_SESSION, REAL_NESTED_JOIN,
-                REAL_GRANT_NOT_EXECUTED, REAL_SECONDARY_ROLES, "novel error", ""]:
+                REAL_GRANT_NOT_EXECUTED, REAL_SECONDARY_ROLES,
+                REAL_USER_PROFILE_INCOMPLETE, REAL_WRONG_STATUS, "novel error", ""]:
         assert required <= set(decode_error(raw))

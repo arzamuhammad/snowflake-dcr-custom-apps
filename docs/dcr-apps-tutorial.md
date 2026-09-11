@@ -688,6 +688,10 @@ terpengaruh karena semuanya ada di `DCR_CONSOLE.META`, bukan di dalam container.
 
 | Gejala | Penyebab | Solusi |
 |---|---|---|
+| **504 / "Could not reach the application backend"** saat klik Join di React app | JOIN dijalankan oleh identitas service SPCS (`MANAGED_SERVICE_n`). DCR menuntut acting user punya `first_name`, `last_name`, `email` — dan identitas service **bukan objek user**, jadi tidak bisa di-`ALTER USER`. Instalasi mandek, request menggantung, gateway timeout | JOIN **tidak bisa** dilakukan dari app. Jalankan `REVIEW` + `JOIN` di worksheet sebagai orang dengan profil lengkap. Halaman Invitations sekarang menyediakan SQL siap-copy |
+| `090655 (P0002): Please add your first/last name and email` | Profil acting user tidak lengkap | `ALTER USER <n> SET first_name=…, last_name=…, email=…`. Kalau acting user adalah identitas service, tidak ada yang bisa di-set — pindah ke worksheet |
+| Status `INSTALLATION_FAILED`, dan `LEAVE` ditolak | `LEAVE` hanya sah dari `LOCAL_DROP_PENDING`/`LEAVING` | Panggil `REVIEW` ulang dengan source name yang sama, lalu `JOIN`. Baca kolom `DETAILS` dari `GET_STATUS` dulu untuk tahu sebabnya |
+| Auto-join owner gagal dengan `SYSTEM$ACCEPT_LEGAL_TERMS` | Task auto-join DCR sendiri menjalankan JOIN di dalam stored procedure | Jangan pakai auto-join. Owner JOIN manual di level sesi. Centang auto-join sudah dihapus dari UI |
 | `SecondaryRolesNotSupported: Secondary roles must be disabled` saat register / link | Sesi masih mengaktifkan secondary roles. DCR menolak karena privilege efektifnya jadi ambigu | Jalankan `USE SECONDARY ROLES NONE` di **level sesi**, lalu ulangi. Ini **tidak bisa** ditaruh di dalam `INVOKE` — `USE` dilarang di stored procedure. Kedua UI sudah melakukannya saat startup, jadi cukup reload halaman |
 | URL app 404 atau tidak bisa diakses | Grant `BIND SERVICE ENDPOINT` hilang | `GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE <role>;` lalu deploy ulang |
 | Deploy gagal "warehouse not found" | `snowflake.yml` menunjuk warehouse yang tidak ada | Edit `query_warehouse:` |
@@ -1112,7 +1116,7 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 | `REGISTER_DATA_OFFERING` * | **`COLLABORATION.JOIN`** — memanggil `SYSTEM$ACCEPT_LEGAL_TERMS` |
 | `INITIALIZE` | **`ADMIN.CHECK_PRIVILEGES`** — menjalankan statement `USE` |
 | `LINK_DATA_OFFERING`, `LINK_LOCAL_DATA_OFFERING` * | **`USE SECONDARY ROLES NONE`** — statement `USE` |
-| `RUN` (overlap dan aktivasi) | |
+| `RUN` (overlap dan aktivasi) | **Auto-join task DCR** — menjalankan JOIN, jadi kena batasan yang sama |
 | `VIEW_*` (semua) | |
 | `PROCESS_ACTIVATION` | |
 | `TEARDOWN`, `LEAVE`, `GET_STATUS` | |
@@ -1120,6 +1124,25 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 \* Aman untuk *dijalankan* di dalam procedure, tapi menuntut sesi pemanggilnya
 sudah mematikan secondary roles. Jadi prasyaratnya berada di luar façade
 meskipun operasinya sendiri di dalam. Lihat baris `USE SECONDARY ROLES NONE`.
+
+### JOIN tidak cukup "di level sesi" — harus manusia
+
+`JOIN` punya syarat kedua yang lebih keras daripada nest-safety, dan ini menutup
+semua jalur dari app yang ter-deploy:
+
+DCR menuntut acting user punya `first_name`, `last_name`, dan `email`, karena
+JOIN menerima syarat hukum dan perjanjian butuh orang yang bisa disebut namanya.
+
+| Model | Punya privilege DCR? | Punya profil user? | JOIN |
+|---|---|---|---|
+| Owner's rights (identitas service SPCS) | ya | **tidak** — bukan objek user, `ALTER USER` tidak ada sasarannya | gagal saat instalasi → 504 |
+| Caller's rights (business user) | **tidak** — sengaja tanpa `SAMOOHA_APP_ROLE` | ya | gagal karena privilege |
+
+Kesimpulannya JOIN adalah **tindakan administratif satu kali per kolaborasi**,
+dijalankan orang di worksheet — bukan aktivitas business user. Halaman
+Invitations di Track B karena itu tidak punya tombol Join; ia menampilkan spec
+untuk ditelaah lalu menyerahkan SQL siap-copy. Ini batasan platform, bukan fitur
+yang belum dibuat.
 
 Yang tidak aman harus dijalankan **di level sesi** oleh lapisan UI. Di Streamlit
 in Snowflake ini otomatis. Di React/SPCS, handler API harus memanggil `CALL`

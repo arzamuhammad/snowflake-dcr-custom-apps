@@ -144,6 +144,81 @@ def decode_error(raw: str) -> dict[str, Any]:
             "severity": "blocked",
         }
 
+    # -- Acting user has no profile -------------------------------------------
+    # DCR requires first_name, last_name and email on whoever performs a JOIN,
+    # because joining accepts legal terms and the agreement needs a named person.
+    #
+    # This is unfixable from a deployed app rather than merely inconvenient: an
+    # SPCS managed service identity is not a user object, so ALTER USER has
+    # nothing to target. It surfaces as INSTALLATION_FAILED, and to an app caller
+    # as a gateway timeout, because installation stalls rather than returning.
+    if "add your first/last name and email" in msg or "090655" in msg:
+        return {
+            "code": "USER_PROFILE_INCOMPLETE",
+            "title": "The user performing this action has no profile",
+            "cause": (
+                "Joining a collaboration accepts legal terms, so Data Clean Rooms requires "
+                "first_name, last_name and email on the acting user. The identity used here "
+                "has none. If this came from an app, the identity is an SPCS managed service "
+                "account, which is not a user object and cannot be given a profile at all."
+            ),
+            "remediation": (
+                "Run REVIEW and JOIN as a person, in a worksheet, not through an app. Set the "
+                "profile first if it is missing. Afterwards the collaboration is usable from "
+                "the app as normal — this only blocks joining."
+            ),
+            "sql_fix": (
+                "-- Check what is missing:\n"
+                "SHOW USERS LIKE CURRENT_USER();\n"
+                "\n"
+                "ALTER USER <username> SET\n"
+                "    first_name = '<first>',\n"
+                "    last_name  = '<last>',\n"
+                "    email      = '<email>';"
+            ),
+            "retryable": False,
+            "severity": "blocked",
+        }
+
+    # -- Wrong collaboration status for the requested action ------------------
+    # Most often LEAVE attempted from INSTALLATION_FAILED, which DCR rejects. The
+    # way out is REVIEW again followed by JOIN; LEAVE only works once the
+    # collaboration is already on its way out.
+    if "InvalidCollaborationStatusError" in msg or "action requires the collaboration status" in msg:
+        current = None
+        m = re.search(r"Current status:\s*([A-Z_]+)", msg)
+        if m:
+            current = m.group(1)
+        stuck_installing = current in {"INSTALLATION_FAILED", "CREATE_FAILED", "JOIN_FAILED"}
+        return {
+            "code": "WRONG_COLLABORATION_STATUS",
+            "title": (
+                f"The collaboration is {current} and cannot do this yet"
+                if current
+                else "The collaboration is in the wrong state for this action"
+            ),
+            "cause": (
+                "Each operation is only valid from certain statuses. "
+                + (
+                    f"{current} is a failure state: the local install did not complete, so there "
+                    "is nothing consistent to leave or run against."
+                    if stuck_installing
+                    else "DCR listed the statuses it will accept in the message below."
+                )
+            ),
+            "remediation": (
+                "Recover by calling REVIEW again with the same source name, then JOIN. LEAVE is "
+                "rejected from a failed install, so it is not the way out. Read the DETAILS "
+                "column of GET_STATUS first — an incomplete user profile and a nested "
+                "SYSTEM$ACCEPT_LEGAL_TERMS are the two causes seen in practice."
+                if stuck_installing
+                else "Check GET_STATUS, wait for a valid status, then retry."
+            ),
+            "sql_fix": None,
+            "retryable": False,
+            "severity": "blocked",
+        }
+
     # -- Missing REFERENCE_USAGE on the shared database ----------------------
     # Two variants: plain REFERENCE_USAGE (JOIN) and WITH GRANT OPTION
     # (REGISTER/LINK). DCR names the database, and sometimes the SCO share.

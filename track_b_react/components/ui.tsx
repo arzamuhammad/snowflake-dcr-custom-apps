@@ -6,6 +6,8 @@
  * every page, not to build a component library.
  */
 
+import * as React from "react";
+
 import type { DcrError, FacadeResult, HealthCheckItem } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,42 @@ export function ErrorPanel({ error, raw }: { error: DcrError; raw?: string }) {
           <pre>{raw}</pre>
         </details>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * A block of SQL with a copy button.
+ *
+ * Used where the app deliberately cannot perform an action itself and has to
+ * hand the operator a statement to run elsewhere. Joining a collaboration is
+ * the main case: it accepts legal terms, which Snowflake only allows an
+ * identifiable user to do.
+ */
+export function CopyBlock({ sql, label }: { sql: string; label?: string }) {
+  const [copied, setCopied] = React.useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard is unavailable over plain HTTP and in some embedded webviews.
+      // The <pre> is selectable, so failing quietly still leaves a usable path.
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="flex" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        {label ? <div style={{ fontSize: 12, fontWeight: 500 }}>{label}</div> : <span />}
+        <button onClick={copy} style={{ fontSize: 12 }}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre style={{ marginTop: 6 }}>{sql}</pre>
     </div>
   );
 }
