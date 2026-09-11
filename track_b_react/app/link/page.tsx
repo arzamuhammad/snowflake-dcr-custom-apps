@@ -153,34 +153,64 @@ export default function LinkDataPage() {
             </button>
           </Card>
 
-          <Card title="Share my offering to runners (LINK_DATA_OFFERING)">
-            <p className="muted" style={{ marginTop: 0 }}>
-              As a data provider, share one of your offerings with named analysis runners. Usually
-              already done at creation time.
-            </p>
-            <div className="row">
-              <div className="field">
-                <label>Offering to share</label>
-                <select value={partnerOffering} onChange={(e) => setPartnerOffering(e.target.value)}>
-                  <option value="">Select…</option>
-                  {offeringIds.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
+          {/* LINK_DATA_OFFERING belongs to a data provider. Offering it to a pure
+              analysis runner only produces ProviderNotServingAnalysisRunner, so
+              the operation is disclosed rather than presented as a step. */}
+          {detail.is_data_provider === false ? (
+            <Card title="Share my offering to runners (LINK_DATA_OFFERING)">
+              <Alert kind="info" title="Not your operation in this collaboration">
+                You are{" "}
+                {detail.my_roles?.length ? (
+                  <strong>{detail.my_roles.join(", ")}</strong>
+                ) : (
+                  "not a data provider"
+                )}{" "}
+                here{detail.my_alias ? <> (alias <code>{detail.my_alias}</code>)</> : null}, so there
+                is nothing for you to share outward. Sharing is done by the data provider, in their
+                own account. Attempting it here fails with{" "}
+                <code>ProviderNotServingAnalysisRunner</code>.
+                <div style={{ marginTop: 8 }}>
+                  What you need on this side is <strong>Link my own data</strong> above — the{" "}
+                  <code>c1</code> side of the match.
+                </div>
+              </Alert>
+            </Card>
+          ) : (
+            <Card title="Share my offering to runners (LINK_DATA_OFFERING)">
+              <p className="muted" style={{ marginTop: 0 }}>
+                As a data provider, share one of your offerings with named analysis runners. Usually
+                already done at creation time.
+              </p>
+              {detail.serves_runners?.length ? (
+                <div className="hint" style={{ marginBottom: 10 }}>
+                  You already serve: <code>{detail.serves_runners.join(", ")}</code>. You may only
+                  link for runners the collaboration assigns to you.
+                </div>
+              ) : null}
+              <div className="row">
+                <div className="field">
+                  <label>Offering to share</label>
+                  <select value={partnerOffering} onChange={(e) => setPartnerOffering(e.target.value)}>
+                    <option value="">Select…</option>
+                    {offeringIds.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Runner aliases (comma-separated)</label>
+                  <input value={runnersText} onChange={(e) => setRunnersText(e.target.value)}
+                         placeholder="CONSUMER" />
+                </div>
               </div>
-              <div className="field">
-                <label>Runner aliases (comma-separated)</label>
-                <input value={runnersText} onChange={(e) => setRunnersText(e.target.value)}
-                       placeholder="CONSUMER" />
-              </div>
-            </div>
-            <button onClick={() => doLink("partner")} disabled={busy || !partnerOffering || !runnersText}>
-              {busy ? "Sharing…" : "Share offering"}
-            </button>
-            <Alert kind="info" title="If this fails with 'Grant not executed'">
-              These procedures do not merely read your data — they <em>grant</em> access on it to the
-              collaboration application. A role can only pass on a privilege it holds{" "}
-              <code>WITH GRANT OPTION</code>, so plain <code>SELECT</code> is not enough.
-            </Alert>
-          </Card>
+              <button onClick={() => doLink("partner")} disabled={busy || !partnerOffering || !runnersText}>
+                {busy ? "Sharing…" : "Share offering"}
+              </button>
+              <Alert kind="info" title="If this fails with 'Grant not executed'">
+                These procedures do not merely read your data — they <em>grant</em> access on it to the
+                collaboration application. A role can only pass on a privilege it holds{" "}
+                <code>WITH GRANT OPTION</code>, so plain <code>SELECT</code> is not enough.
+              </Alert>
+            </Card>
+          )}
         </>
       ) : null}
     </>

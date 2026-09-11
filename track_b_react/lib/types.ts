@@ -139,6 +139,21 @@ export interface CollaborationDetail {
   templates: string[];
   has_overlap_template: boolean;
   has_activation_template: boolean;
+
+  /** This account's alias and roles inside the collaboration.
+   *
+   * Present so the UI can offer only the link operation that is legal here.
+   * LINK_DATA_OFFERING attempted by a pure analysis runner fails with
+   * ProviderNotServingAnalysisRunner, which reads like a fault rather than
+   * "that operation belongs to the other side". May be absent if role
+   * detection failed, in which case show both and let DCR arbitrate.
+   */
+  my_alias?: string | null;
+  my_roles?: string[];
+  is_data_provider?: boolean;
+  is_analysis_runner?: boolean;
+  is_owner?: boolean;
+  serves_runners?: string[];
 }
 
 export interface PreflightData {

@@ -144,6 +144,49 @@ def decode_error(raw: str) -> dict[str, Any]:
             "severity": "blocked",
         }
 
+    # -- Wrong side of the link operation -------------------------------------
+    # LINK_DATA_OFFERING is a data provider sharing outward to the runners the
+    # collaboration assigns to it. An analysis runner attaching its own table
+    # wants LINK_LOCAL_DATA_OFFERING instead. The two are easy to confuse because
+    # the official Snowsight UI exposes only the first and calls it "Share Data
+    # Offering", so people reach for it when the local link is what they need.
+    if "ProviderNotServingAnalysisRunner" in msg:
+        current = None
+        runner = None
+        m = re.search(r"Current account:\s*([A-Za-z0-9_]+)", msg)
+        if m:
+            current = m.group(1)
+        m = re.search(r"analysis runner:\s*([A-Za-z0-9_]+)", msg)
+        if m:
+            runner = m.group(1)
+        same = current and runner and current.upper() == runner.upper()
+        return {
+            "code": "NOT_A_DATA_PROVIDER_FOR_RUNNER",
+            "title": "This is the provider's operation, not yours",
+            "cause": (
+                (
+                    f"You are {current}, and you tried to share an offering to {runner} — yourself. "
+                    "LINK_DATA_OFFERING is how a data provider pushes its data outward to the "
+                    "runners it serves, so it cannot target the caller."
+                    if same
+                    else
+                    f"{current or 'This account'} is not a data provider for analysis runner "
+                    f"{runner or 'the requested runner'} in this collaboration, so it may not link "
+                    "offerings on that runner's behalf."
+                )
+            ),
+            "remediation": (
+                "If you are the one running the analysis, you want LINK_LOCAL_DATA_OFFERING "
+                "instead — it attaches your own table as the c1 side of the match. Use "
+                "\"Link my own data\" on the Link Data screen.\n\n"
+                "Sharing outward is done by the data provider, from their own account, and only "
+                "for the runners the collaboration spec assigns to them."
+            ),
+            "sql_fix": None,
+            "retryable": False,
+            "severity": "error",
+        }
+
     # -- Acting user has no profile -------------------------------------------
     # DCR requires first_name, last_name and email on whoever performs a JOIN,
     # because joining accepts legal terms and the agreement needs a named person.

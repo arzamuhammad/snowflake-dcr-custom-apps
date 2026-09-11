@@ -783,6 +783,40 @@ def get_collaboration_detail(session, collaboration: str, ui_track: str = "sql")
             (mine if is_local else partner).append(item)
 
         template_ids = [t.get("TEMPLATE_ID") for t in templates]
+
+        # Which roles does THIS account hold in this collaboration?
+        #
+        # It decides which link operation is even legal here. Attempting
+        # LINK_DATA_OFFERING as a pure analysis runner fails with
+        # ProviderNotServingAnalysisRunner, which reads like a bug rather than
+        # "that operation is not yours to perform", so the UI needs to know in
+        # advance and offer only what applies.
+        my_roles: list[str] = []
+        my_alias: str | None = None
+        serves_runners: list[str] = []
+        try:
+            status = _rows(session, f"CALL {COLLAB}.GET_STATUS(?)", [collab])
+            here = str(
+                _scalar(session, "SELECT CURRENT_ORGANIZATION_NAME()||'.'||CURRENT_ACCOUNT_NAME()")
+                or ""
+            ).upper()
+            for row in status:
+                acct = str(row.get("COLLABORATOR_ACCOUNT") or "").upper()
+                if acct and acct == here:
+                    my_roles = [r.lower() for r in _split(row.get("ROLES"))]
+                    my_alias = row.get("COLLABORATOR_NAME") or None
+                    break
+        except Exception:
+            # Role detection is advisory. If GET_STATUS is unavailable the UI
+            # simply shows both link operations, as it did before.
+            pass
+
+        # A data provider may only link FOR the runners it actually serves.
+        for o in partner + mine:
+            if str(o.get("shared_by") or "").upper() == str(my_alias or "").upper():
+                serves_runners.extend(_split(o.get("shared_with")))
+        serves_runners = sorted({r for r in serves_runners if r.upper() != "LOCAL"})
+
         return {
             "collaboration": collab,
             "partner_offerings": partner,
@@ -790,6 +824,12 @@ def get_collaboration_detail(session, collaboration: str, ui_track: str = "sql")
             "templates": template_ids,
             "has_overlap_template": specs.STANDARD_OVERLAP_TEMPLATE in template_ids,
             "has_activation_template": specs.STANDARD_ACTIVATION_TEMPLATE in template_ids,
+            "my_alias": my_alias,
+            "my_roles": my_roles,
+            "is_data_provider": "data provider" in my_roles or "data_provider" in my_roles,
+            "is_analysis_runner": "analysis runner" in my_roles or "analysis_runner" in my_roles,
+            "is_owner": "owner" in my_roles,
+            "serves_runners": serves_runners,
         }
 
     return _run(session, "GET_COLLABORATION_DETAIL", _work, ui_track=ui_track,

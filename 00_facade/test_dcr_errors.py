@@ -74,6 +74,20 @@ REAL_WRONG_STATUS = (
     " in function LEAVE with handler main"
 )
 
+# Captured when an analysis runner tried LINK_DATA_OFFERING for itself, having
+# mistaken it for LINK_LOCAL_DATA_OFFERING.
+REAL_WRONG_LINK_SIDE = (
+    "(1304): 01c6fe7f-0001-a065-0000-31d50839587a: 100357 (P0000): "
+    "Python Interpreter Error:\n"
+    "Traceback (most recent call last):\n"
+    '  File "_udf_code.py", line 25, in main\n'
+    "    raise e.with_traceback(None) from None\n"
+    "navlib.app.collaboration.exceptions.ProviderNotServingAnalysisRunner: "
+    "A data provider can link data offerings only for their analysis runners. "
+    "Current account: CONSUMER; analysis runner: CONSUMER.\n"
+    " in function LINK_DATA_OFFERING with handler main"
+)
+
 # Captured when LINK_LOCAL_DATA_OFFERING lacked WITH GRANT OPTION.
 REAL_GRANT_NOT_EXECUTED = (
     "Exception: **FAILURE**: Received error, observed: 003102 (42501): "
@@ -264,10 +278,29 @@ def test_failed_install_recovery_is_review_then_join_not_leave():
     assert "REVIEW" in out["remediation"] and "JOIN" in out["remediation"]
 
 
+def test_wrong_link_side_points_at_the_local_variant():
+    """The whole value of this case is naming the operation they actually wanted.
+
+    LINK_DATA_OFFERING and LINK_LOCAL_DATA_OFFERING are trivially confusable, and
+    the raw DCR message never mentions the local variant.
+    """
+    out = decode_error(REAL_WRONG_LINK_SIDE)
+    assert out["code"] == "NOT_A_DATA_PROVIDER_FOR_RUNNER"
+    assert "LINK_LOCAL_DATA_OFFERING" in out["remediation"]
+
+
+def test_wrong_link_side_notices_the_runner_is_the_caller():
+    """CONSUMER sharing to CONSUMER deserves a plainer explanation than a
+    generic 'not a provider for that runner'."""
+    out = decode_error(REAL_WRONG_LINK_SIDE)
+    assert "yourself" in out["cause"]
+
+
 def test_every_decoded_error_has_the_full_contract():
     """The UI renders these keys unconditionally, so none may be missing."""
     required = {"code", "title", "cause", "remediation", "sql_fix", "retryable", "severity"}
     for raw in [REAL_REFERENCE_USAGE, REAL_RESTRICTED_SESSION, REAL_NESTED_JOIN,
                 REAL_GRANT_NOT_EXECUTED, REAL_SECONDARY_ROLES,
-                REAL_USER_PROFILE_INCOMPLETE, REAL_WRONG_STATUS, "novel error", ""]:
+                REAL_USER_PROFILE_INCOMPLETE, REAL_WRONG_STATUS,
+                REAL_WRONG_LINK_SIDE, "novel error", ""]:
         assert required <= set(decode_error(raw))
