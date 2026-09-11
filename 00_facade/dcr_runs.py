@@ -368,11 +368,17 @@ def import_activation(session, collaboration: str, batch_id: str, target_fqn: st
                                   field="batch_id")
 
         import_id = _scalar(session, "SELECT UUID_STRING()")
+
+        # expected_rows may be None when the caller (the UI) does not know the
+        # count yet. Snowpark's params turns Python None into the STRING 'None'
+        # rather than SQL NULL, which fails the numeric column. Use an explicit
+        # NULL literal in the SQL instead of pushing it through the bind array.
+        exp = int(expected_rows) if expected_rows is not None else None
         session.sql(f"""
             INSERT INTO {META}.ACTIVATION_IMPORT
               (IMPORT_ID, COLLABORATION, BATCH_ID, TARGET_FQN, EXPECTED_ROWS, STATUS)
-            SELECT ?, ?, ?, ?, ?, 'IMPORTING'
-        """, params=[import_id, collab, batch, target, expected_rows]).collect()
+            SELECT ?, ?, ?, ?, {exp if exp is not None else 'NULL'}, 'IMPORTING'
+        """, params=[import_id, collab, batch, target]).collect()
 
         try:
             # 1. Ask DCR to process the batch. Older versions auto-process, so a
