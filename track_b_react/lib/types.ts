@@ -252,6 +252,20 @@ export interface ActivationBatch {
   raw: Record<string, unknown>;
   import: ImportState | null;
   imported: boolean;
+
+  /** How the batch reached this account.
+   *
+   *   "shared"  listed by VIEW_ACTIVATIONS, sent from another account, still
+   *             needs PROCESS_ACTIVATION.
+   *   "arrived" listed by VIEW_ACTIVATIONS and its rows are already present.
+   *   "local"   activated to this account by this account. VIEW_ACTIVATIONS
+   *             never lists these, because there is no cross-account share to
+   *             process — the rows land straight in SEGMENT_RECORDS.
+   */
+  delivery?: "shared" | "arrived" | "local";
+
+  /** Rows currently present in SEGMENT_RECORDS for this batch, if known. */
+  available_rows?: number | null;
 }
 
 export interface ImportProgressData {

@@ -273,18 +273,65 @@ def list_activations(session, collaboration: str, ui_track: str = "sql") -> dict
             }
 
         batches = []
+        seen: set[str] = set()
         for r in rows:
             upper = {k.upper(): v for k, v in r.items()}
             bid = str(upper.get("BATCH_ID") or upper.get("ACTIVATION_ID") or "")
+            seen.add(bid)
             batches.append({
                 "batch_id": bid,
                 "segment_name": upper.get("SEGMENT_NAME"),
                 "status": upper.get("STATUS"),
                 "updated_on": str(upper.get("UPDATED_ON")) if upper.get("UPDATED_ON") else None,
+                "delivery": "shared",
                 "raw": r,
                 "import": imports.get(bid),
                 "imported": bool(imports.get(bid) and imports[bid]["status"] == "READY"),
             })
+
+        # VIEW_ACTIVATIONS lists batches that arrived from ANOTHER account and are
+        # waiting for PROCESS_ACTIVATION. It is empty when a runner activates to
+        # itself, because there is no cross-account share to process — the rows
+        # land straight in SEGMENT_RECORDS.
+        #
+        # Reading only VIEW_ACTIVATIONS therefore told a self-activating user
+        # "no activations" while half a million rows sat in the table. Query the
+        # records directly so locally-available batches are listed too.
+        share_db = f"SFDCR_{collab.upper()}"
+        try:
+            local = _rows(session, f"""
+                SELECT SEGMENT_NAME, BATCH_ID, COUNT(*) AS ROW_COUNT,
+                       MAX(UPDATED_ON) AS UPDATED_ON
+                FROM {share_db}.ACTIVATION.SEGMENT_RECORDS
+                GROUP BY 1, 2
+            """)
+        except Exception:
+            # The share is absent until the first activation lands. Not an error.
+            local = []
+
+        for r in local:
+            bid = str(r.get("BATCH_ID") or "")
+            if bid in seen:
+                # Already listed from VIEW_ACTIVATIONS; enrich that entry rather
+                # than adding a duplicate row for the same batch.
+                for b in batches:
+                    if b["batch_id"] == bid:
+                        b["available_rows"] = r.get("ROW_COUNT")
+                        b["delivery"] = "arrived"
+                continue
+            batches.append({
+                "batch_id": bid,
+                "segment_name": r.get("SEGMENT_NAME"),
+                "status": "AVAILABLE",
+                "updated_on": str(r.get("UPDATED_ON")) if r.get("UPDATED_ON") else None,
+                "delivery": "local",
+                "available_rows": r.get("ROW_COUNT"),
+                "raw": dict(r),
+                "import": imports.get(bid),
+                "imported": bool(imports.get(bid) and imports[bid]["status"] == "READY"),
+            })
+
+        batches.sort(key=lambda b: str(b.get("updated_on") or ""), reverse=True)
         return {"collaboration": collab, "activations": batches}
 
     return _run(session, "LIST_ACTIVATIONS", _work, ui_track=ui_track,

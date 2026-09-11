@@ -99,6 +99,10 @@ export default function InboxPage() {
       {collab && !loading && !batches.length ? (
         <Alert kind="info" title="No activations for this collaboration">
           Once someone runs an activation targeting your account, the batch appears here.
+          <div style={{ marginTop: 8 }}>
+            If you just ran one and expected it here: activations that target a{" "}
+            <em>different</em> account appear in that account&apos;s inbox, not yours.
+          </div>
         </Alert>
       ) : null}
 
@@ -115,7 +119,26 @@ export default function InboxPage() {
             <div className="hint" style={{ marginBottom: 12 }}>
               Batch <code>{b.batch_id}</code>
               {b.updated_on ? <> · updated {b.updated_on.slice(0, 19)}</> : null}
+              {b.available_rows != null ? <> · {fmt(b.available_rows)} rows available</> : null}
             </div>
+
+            {/* A batch activated to your own account skips the share-and-process
+                dance entirely: the rows are already in SEGMENT_RECORDS. Saying so
+                matters, because the alternative reading is "nothing happened". */}
+            {b.delivery === "local" && !b.imported ? (
+              <Alert kind="ok" title="Already delivered — importing is optional">
+                You activated to your own account, so there was no share to accept: the rows
+                landed directly and are queryable now.
+                {b.available_rows != null ? <> {fmt(b.available_rows)} rows are present.</> : null}
+                <div style={{ marginTop: 8 }}>
+                  They sit in a <code>VARIANT</code> column whose keys keep their{" "}
+                  <code>p1.</code> / <code>c1.</code> prefixes, so every query needs
+                  <code>RECORDS:ID:&quot;p1.COLUMN&quot;</code>. Importing below flattens them into an
+                  ordinary table with real column names — worth doing, but nothing is lost if
+                  you skip it.
+                </div>
+              </Alert>
+            ) : null}
 
             {b.import?.status === "FAILED" ? (
               <Alert kind="err" title="A previous import failed">
