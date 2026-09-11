@@ -1,58 +1,42 @@
 "use client";
 
 /**
- * Invitations — review the spec, then join outside the app.
+ * Invitations — review and join a collaboration.
  *
- * Joining is deliberately NOT performed here, and that is a platform constraint
- * rather than a missing feature. COLLABORATION.JOIN calls
- * SYSTEM$ACCEPT_LEGAL_TERMS, and Snowflake requires the acting user to have a
- * real profile — first_name, last_name and email — because somebody is agreeing
- * to legal terms. That leaves no viable path from a deployed app:
+ * JOIN runs as the CALLER (the person logged in), not as the app's service
+ * identity. This is the one operation that uses caller's rights, because:
  *
- *   - Owner's rights (what this app uses) acts as an SPCS managed service
- *     identity. It holds the DCR privileges but is not a user object at all, so
- *     it cannot be given a profile. JOIN fails during installation, the request
- *     hangs, and the caller sees a gateway 504.
- *   - Caller's rights acts as the signed-in person, who has a profile but
- *     deliberately does not hold SAMOOHA_APP_ROLE — that separation is the
- *     entire point of the owner's-rights design. JOIN fails on privileges.
+ *   1. COLLABORATION.JOIN calls SYSTEM$ACCEPT_LEGAL_TERMS, which requires a
+ *      user with first_name, last_name and email — a real person.
+ *   2. It needs SAMOOHA_APP_ROLE, which the caller must hold.
  *
- * So this page shows the spec to review and hands over ready-to-run SQL. Joining
- * is a one-time administrative act per collaboration, not a recurring business-
- * user task, and the person doing it should be identifiable. Everything after
- * joining works normally in the app.
+ * Every other operation continues through the facade with owner's rights.
+ *
+ * If caller's rights is unavailable (missing token, local dev), the page falls
+ * back to showing copy-ready SQL.
  */
 
 import { useEffect, useState } from "react";
 
-import { listCollaborations } from "@/lib/facade";
-import type { CollaborationSummary } from "@/lib/types";
+import { getStatus, listCollaborations, reviewAndJoin } from "@/lib/facade";
+import type { CollaborationSummary, DcrError } from "@/lib/types";
 
-import { Alert, Card, CopyBlock, PageHeader, Spinner, StatusBadge } from "@/components/ui";
+import { Alert, Card, CopyBlock, ErrorPanel, PageHeader, Spinner, StatusBadge } from "@/components/ui";
 
-const DCR = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION";
+const DCR_COLLAB = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION";
 
 function joinSql(source: string, owner: string, local: string) {
   return [
-    "-- Run as a user whose profile has first_name, last_name and email set,",
-    "-- and whose role can use Data Clean Rooms. Check yours with:",
-    "--   SELECT CURRENT_USER();",
-    "--   SHOW USERS LIKE CURRENT_USER();      -- first_name / last_name / email",
-    "",
+    "-- Prerequisites: SAMOOHA_APP_ROLE + first_name, last_name, email on your profile",
     "USE ROLE ACCOUNTADMIN;",
     "USE WAREHOUSE APP_WH;",
-    "USE SECONDARY ROLES NONE;   -- required; registering and linking fail without it",
+    "USE SECONDARY ROLES NONE;",
     "",
-    `CALL ${DCR}.REVIEW(`,
-    `  '${source}',   -- source_name, as the owner published it`,
-    `  '${owner}',   -- owner_account`,
-    `  '${local}'    -- your local name for it`,
-    ");",
+    `CALL ${DCR_COLLAB}.REVIEW('${source}', '${owner}', '${local}');`,
+    `CALL ${DCR_COLLAB}.JOIN('${local}');`,
     "",
-    `CALL ${DCR}.JOIN('${local}');`,
-    "",
-    "-- Joining takes a few minutes. Poll until STATUS reads exactly JOINED:",
-    `CALL ${DCR}.GET_STATUS('${local}');`,
+    "-- Poll until every row reads exactly JOINED:",
+    `CALL ${DCR_COLLAB}.GET_STATUS('${local}');`,
   ].join("\n");
 }
 
@@ -61,6 +45,10 @@ export default function InvitationsPage() {
   const [joined, setJoined] = useState<CollaborationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [localNames, setLocalNames] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<DcrError | null>(null);
+  const [errorRaw, setErrorRaw] = useState<string | undefined>();
+  const [statuses, setStatuses] = useState<Record<string, Record<string, unknown>[]>>({});
 
   async function load() {
     setLoading(true);
@@ -83,11 +71,58 @@ export default function InvitationsPage() {
     load();
   }, []);
 
+  async function join(inv: CollaborationSummary) {
+    const source = inv.source_name!;
+    setBusy(source);
+    setError(null);
+
+    const r = await reviewAndJoin({
+      source_name: source,
+      owner_account: inv.owner_account ?? "",
+      local_name: localNames[source] ?? source,
+    });
+
+    if (!r.ok) {
+      setError(r.error);
+      setErrorRaw(r.error_raw);
+      setBusy(null);
+      return;
+    }
+
+    // Poll to JOINED. Matching is exact to avoid confusing JOINING with JOINED.
+    const local = localNames[source] ?? source;
+    for (let i = 0; i < 20; i++) {
+      const s = await getStatus(local);
+      if (s.ok) {
+        setStatuses((p) => ({ ...p, [source]: s.data.status }));
+        const states = s.data.status.map((r) => String(r.STATUS ?? "").trim().toUpperCase());
+        if (states.length && states.every((st) => st === "JOINED")) break;
+        if (states.some((st) => st.endsWith("_FAILED"))) break;
+      }
+      await new Promise((res) => setTimeout(res, 12000));
+    }
+
+    setBusy(null);
+    await load();
+  }
+
   if (loading) return <Spinner label="Loading invitations…" />;
 
   return (
     <>
-      <PageHeader title="Invitations" sub="Review what you are agreeing to, then join from a worksheet." />
+      <PageHeader title="Invitations" sub="Review what you are agreeing to, then join." />
+
+      <Alert kind="info" title="Prerequisites for joining">
+        Joining accepts legal terms, so <strong>you</strong> (the person logged in) must have:
+        <ul style={{ marginTop: 6, marginBottom: 0 }}>
+          <li><code>SAMOOHA_APP_ROLE</code> granted to your user</li>
+          <li><code>first_name</code>, <code>last_name</code>, <code>email</code> set on your profile</li>
+        </ul>
+        If either is missing the join will fail with a clear error — not a 504.
+        This is the only operation that needs these; everything else runs through the facade.
+      </Alert>
+
+      {error ? <ErrorPanel error={error} raw={errorRaw} /> : null}
 
       {!invited.length ? (
         <Alert kind="info" title="No pending invitations">
@@ -117,28 +152,38 @@ export default function InvitationsPage() {
                 value={local}
                 onChange={(e) => setLocalNames((p) => ({ ...p, [source]: e.target.value }))}
               />
-              <div className="hint">
-                May differ from the name the owner chose. The SQL below updates as you type.
+              <div className="hint">May differ from the name the owner chose.</div>
+            </div>
+
+            <button className="primary" onClick={() => join(inv)} disabled={busy === source}>
+              {busy === source ? "Joining…" : "Review and join"}
+            </button>
+            {busy === source ? (
+              <div className="flex" style={{ marginTop: 10 }}>
+                <Spinner label="This takes 1–2 minutes…" />
               </div>
-            </div>
+            ) : null}
 
-            <Alert kind="warn" title="Joining has to be done by a person, not by this app">
-              Joining accepts legal terms, so Snowflake requires the acting user to have a profile
-              with first name, last name and email. This app runs as a service identity, which is
-              not a user object and cannot be given one — attempting it here fails during
-              installation and returns a gateway timeout. Run the statements below once in a
-              Snowsight worksheet, then reload this page.
-            </Alert>
+            {statuses[source]?.length ? (
+              <div className="table-wrap" style={{ marginTop: 12 }}>
+                <table>
+                  <thead><tr><th>Collaborator</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {statuses[source].map((s, i) => (
+                      <tr key={i}>
+                        <td>{String(s.COLLABORATOR_NAME ?? "—")}</td>
+                        <td><StatusBadge status={String(s.STATUS ?? "")} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
 
-            <CopyBlock sql={joinSql(source, inv.owner_account ?? "", local)} label="Run once in a worksheet" />
-
-            <div className="hint" style={{ marginTop: 8 }}>
-              If <code>GET_STATUS</code> reports <code>INSTALLATION_FAILED</code>, the usual cause is
-              an incomplete user profile. Fix it with{" "}
-              <code>ALTER USER &lt;name&gt; SET first_name=&apos;…&apos;, last_name=&apos;…&apos;, email=&apos;…&apos;</code>, then
-              call <code>REVIEW</code> again followed by <code>JOIN</code>. <code>LEAVE</code> will
-              not work from that state.
-            </div>
+            <details style={{ marginTop: 12 }}>
+              <summary>Alternative: run manually in a worksheet</summary>
+              <CopyBlock sql={joinSql(source, inv.owner_account ?? "", local)} />
+            </details>
           </Card>
         );
       })}

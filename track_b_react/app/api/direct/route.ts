@@ -1,23 +1,29 @@
 /**
- * POST /api/direct — REVIEW + JOIN at session level.
+ * POST /api/direct — REVIEW + JOIN using the caller's identity.
  *
- * WHY THIS ROUTE EXISTS
- * COLLABORATION.JOIN installs the clean room application, which calls
- * SYSTEM$ACCEPT_LEGAL_TERMS. Snowflake rejects side-effecting functions inside a
- * stored procedure:
+ * WHY CALLER'S RIGHTS
+ * COLLABORATION.JOIN accepts legal terms via SYSTEM$ACCEPT_LEGAL_TERMS.
+ * Snowflake requires the acting user to have first_name, last_name and email.
  *
- *   090237 (42601): Query called from a stored procedure contains a function
- *   with side effects [SYSTEM$ACCEPT_LEGAL_TERMS].
+ *   - Owner's rights uses an SPCS managed service identity, which is NOT a user
+ *     object. It has no profile and cannot be given one. JOIN fails at install.
+ *   - Caller's rights uses the person who logged into the app. They have a
+ *     profile. But they also need SAMOOHA_APP_ROLE, which is why this is the
+ *     ONLY route that uses caller's rights: granting SAMOOHA_APP_ROLE is
+ *     necessary for joining, but the facade still protects every other operation.
  *
- * So this is the one operation that cannot be wrapped by DCR_CONSOLE.APP.INVOKE.
- * It is issued as a top-level statement instead. Verified on DCR 17.5.
+ * PREREQUISITE
+ * Every user who will join through this app needs:
+ *   1. SAMOOHA_APP_ROLE granted to their user
+ *   2. first_name, last_name, email set on their profile
+ * Without these, the error is clear (USER_PROFILE_INCOMPLETE or privilege error)
+ * rather than a 504 gateway timeout.
  *
- * IMPORTANT OWNERSHIP CONSEQUENCE
- * The role that runs JOIN owns the objects the join creates — SFDCR_<collab>
- * (application) and SFDCR_LOCAL_<collab> (database of local views). Having the
- * app perform the JOIN keeps ownership with the app's role. If an admin joins
- * from a worksheet under a different role instead, the app cannot operate on the
- * collaboration and needs 91_grants/adopt_joined_collaboration.sql.
+ * OWNERSHIP CONSEQUENCE
+ * The role that runs JOIN owns the created objects (SFDCR_<collab> and
+ * SFDCR_LOCAL_<collab>). With caller's rights, those objects are owned by the
+ * caller's active role — which may differ from the app's role. If that causes
+ * privilege issues on later operations, run 91_grants/adopt_joined_collaboration.sql.
  */
 
 import { NextResponse } from "next/server";
@@ -75,14 +81,17 @@ export async function POST(request: Request) {
 
   const DCR = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION";
 
+  // Both REVIEW and JOIN use caller's rights so the person's identity and
+  // profile are visible to DCR.
+  const callerOpts = { callersRights: true };
+
   try {
-    // REVIEW records acceptance of the collaboration terms under a local name.
     await querySnowflake(`CALL ${DCR}.REVIEW(?, ?, ?)`, {
+      ...callerOpts,
       binds: [source, owner, local],
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    // Already reviewed/joined, or a LEAVE is stuck at LOCAL_DROP_PENDING.
     const benign = /already/i.test(message) || /InvitationNotFound/i.test(message);
     if (!benign) {
       return NextResponse.json(
@@ -95,7 +104,9 @@ export async function POST(request: Request) {
             cause: message,
             remediation:
               "If a previous Leave was interrupted, the state may be LOCAL_DROP_PENDING — " +
-              "finish it by leaving again, then a fresh invitation reappears.",
+              "finish it by leaving again, then a fresh invitation reappears.\n\n" +
+              "If the error mentions privileges: the user joining needs SAMOOHA_APP_ROLE. " +
+              "Grant it with: GRANT ROLE SAMOOHA_APP_ROLE TO USER <username>;",
             sql_fix: null,
             retryable: true,
             severity: "error",
@@ -109,35 +120,53 @@ export async function POST(request: Request) {
   }
 
   try {
-    await querySnowflake(`CALL ${DCR}.JOIN(?)`, { binds: [local] });
+    await querySnowflake(`CALL ${DCR}.JOIN(?)`, { ...callerOpts, binds: [local] });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    const profileMissing = /first\/last name/i.test(message) || /090655/i.test(message);
     const needsGrant = /ReferenceUsage/i.test(message);
     const shareMatch = message.match(/TO SHARE ([A-Za-z_][\w$]*)/i);
     const dbMatch = message.match(/database '([^']+)'/i);
+    const needsRole = /not authorized/i.test(message) || /Insufficient privileges/i.test(message);
+
+    let code = "JOIN_FAILED";
+    let title = "Join failed";
+    let remediation = "Check the collaboration status. If a previous join failed, call REVIEW again then JOIN.";
+    let sql_fix: string | null = null;
+    let severity = "error";
+
+    if (profileMissing) {
+      code = "USER_PROFILE_INCOMPLETE";
+      title = "Your user profile is incomplete";
+      remediation =
+        "Joining accepts legal terms, so your profile must have first_name, last_name and email. " +
+        "Ask an admin to set them, or run ALTER USER yourself, then retry.";
+      sql_fix = "ALTER USER <your_username> SET first_name='…', last_name='…', email='…';";
+      severity = "blocked";
+    } else if (needsGrant) {
+      code = "REFERENCE_USAGE_MISSING";
+      title = "A grant is missing on the shared database";
+      remediation =
+        "This is expected the first time a database is shared into a clean room. " +
+        "Apply the grant as ACCOUNTADMIN and retry. Do NOT grant to " +
+        "SAMOOHA_BY_SNOWFLAKE_APP_SHARE — that belongs to the deprecated v1 interface.";
+      sql_fix = needsGrant && shareMatch && dbMatch
+        ? `GRANT REFERENCE_USAGE ON DATABASE ${dbMatch[1]} TO SHARE ${shareMatch[1]};`
+        : null;
+      severity = "blocked";
+    } else if (needsRole) {
+      code = "MISSING_DCR_ROLE";
+      title = "You need SAMOOHA_APP_ROLE to join";
+      remediation = "Ask an admin to grant it. This is needed only for joining — all other operations go through the facade.";
+      sql_fix = "GRANT ROLE SAMOOHA_APP_ROLE TO USER <your_username>;";
+      severity = "blocked";
+    }
 
     return NextResponse.json(
       {
         ok: false,
         operation: "JOIN_COLLABORATION",
-        error: {
-          code: needsGrant ? "REFERENCE_USAGE_MISSING" : "JOIN_FAILED",
-          title: needsGrant ? "A grant is missing on the shared database" : "Join failed",
-          cause: message,
-          remediation: needsGrant
-            ? "This is expected the first time a database is shared into a clean room. " +
-              "Apply the grant as ACCOUNTADMIN and retry. Do NOT grant to " +
-              "SAMOOHA_BY_SNOWFLAKE_APP_SHARE — that named share belongs to the deprecated " +
-              "v1 interface and does not exist here."
-            : "Check the collaboration status. If a previous join failed, the owner may need " +
-              "to tear down and recreate.",
-          sql_fix:
-            needsGrant && shareMatch && dbMatch
-              ? `GRANT REFERENCE_USAGE ON DATABASE ${dbMatch[1]} TO SHARE ${shareMatch[1]};`
-              : null,
-          retryable: true,
-          severity: needsGrant ? "blocked" : "error",
-        },
+        error: { code, title, cause: message, remediation, sql_fix, retryable: true, severity },
         error_raw: message,
         duration_ms: Date.now() - started,
       },
@@ -145,16 +174,17 @@ export async function POST(request: Request) {
     );
   }
 
-  // JOIN is asynchronous. Report the current state and let the client poll
-  // rather than holding the request open for minutes.
+  // JOIN is asynchronous. Report the current state and let the client poll.
   let status: Record<string, unknown>[] = [];
   try {
+    // GET_STATUS is safe through owner's rights — no caller identity needed.
     status = await querySnowflake(`CALL ${DCR}.GET_STATUS(?)`, { binds: [local] });
   } catch {
     /* status is informational */
   }
 
-  const joined = JSON.stringify(status).toUpperCase().includes("JOINED");
+  const states = status.map((r) => String(r.STATUS ?? "").trim().toUpperCase());
+  const joined = states.length > 0 && states.every((st) => st === "JOINED");
 
   return NextResponse.json({
     ok: true,

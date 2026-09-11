@@ -1,13 +1,23 @@
 -- ============================================================================
 -- Grant business users access to the DCR Console apps.
 --
--- Both tracks run with OWNER'S RIGHTS: every DCR call executes as the app's
--- role, whatever role the end user holds. Business users must therefore NOT be
--- granted SAMOOHA_APP_ROLE — they only need to be able to open the app.
+-- Both tracks run with OWNER'S RIGHTS for all operations except JOIN: every
+-- DCR call executes as the app's role, whatever role the end user holds.
+--
+-- JOIN is the exception. It accepts legal terms via SYSTEM$ACCEPT_LEGAL_TERMS,
+-- which Snowflake requires a named person to do. The app therefore runs JOIN
+-- as the CALLER (the person logged in), using caller's rights. For this to
+-- work, the caller needs SAMOOHA_APP_ROLE — see the grant below.
+--
+-- This is safe: SAMOOHA_APP_ROLE alone does not bypass the facade. The app
+-- only offers one caller's-rights path (REVIEW + JOIN), and all other
+-- operations still go through DCR_CONSOLE.APP.INVOKE with owner's rights.
+-- A determined user could open a worksheet and call DCR directly, but that is
+-- true of any privilege on any system and is outside the app's control.
 --
 -- Access is controlled at two independent layers, and BOTH must pass:
 --   1. App grant           — can this role open the app at all?
---   2. DCR collaboration    — which collaborations can it see and query?
+--   2. DCR collaboration   — which collaborations can it see and query?
 -- A user with the app grant but no collaboration privilege gets an empty list.
 -- ============================================================================
 
@@ -44,8 +54,19 @@ GRANT USAGE ON APPLICATION SERVICE
 GRANT USAGE ON WAREHOUSE APP_WH                               TO ROLE DCR_BUSINESS_USER;
 
 -- ---------------------------------------------------------------------------
+-- SAMOOHA_APP_ROLE — needed for JOIN (the only caller's-rights operation).
+--
+-- Without this, the user can do everything EXCEPT accept invitations. All
+-- other DCR operations go through the facade and do not need this role.
+-- ---------------------------------------------------------------------------
+GRANT ROLE SAMOOHA_APP_ROLE TO ROLE DCR_BUSINESS_USER;
+
+-- ---------------------------------------------------------------------------
 -- Assign to people. GRANT does not evaluate functions, so the username must be
 -- a literal: TO USER CURRENT_USER() is a syntax error.
+--
+-- Also ensure each user's profile is complete (first_name, last_name, email),
+-- because JOIN will reject a user without one.
 -- ---------------------------------------------------------------------------
 -- GRANT ROLE DCR_BUSINESS_USER TO USER <USERNAME>;
 
