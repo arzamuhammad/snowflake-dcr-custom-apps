@@ -37,6 +37,49 @@ export const dynamic = "force-dynamic";
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ACCOUNT = /^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$/;
 
+const DCR_DB = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB";
+
+/**
+ * Restricted caller's rights, with no caller grants in place.
+ *
+ * A Snowflake App Runtime service gets RESTRICTED caller's rights, never
+ * unrestricted ones, so the caller's privileges are unusable until an admin
+ * declares them as caller grants. Until then DCR's procedures do not resolve at
+ * all, so Snowflake reports a missing function rather than a privilege problem —
+ * which sends you looking for the wrong fix.
+ */
+function callerGrantsMissing(message: string): boolean {
+  return /restricted caller/i.test(message) || /CALLER USAGE/i.test(message);
+}
+
+const CALLER_GRANTS_REMEDIATION =
+  "The service runs with restricted caller's rights, so your privileges are not usable " +
+  "until an administrator declares them as caller grants. Grant them to the role that OWNS " +
+  "the service (find it in the `owner` column of SHOW APPLICATION SERVICES IN ACCOUNT), not " +
+  "to your user. Run dcr-console/91_grants/grants_caller_rights.sql once per account, then " +
+  "retry. This grants no new privilege — you still need SAMOOHA_APP_ROLE and a complete profile.";
+
+const CALLER_GRANTS_SQL = [
+  "USE ROLE ACCOUNTADMIN;",
+  "-- Replace ACCOUNTADMIN with the service owner if it differs.",
+  "",
+  `GRANT CALLER USAGE ON DATABASE ${DCR_DB} TO ROLE ACCOUNTADMIN;`,
+  `GRANT INHERITED CALLER USAGE ON ALL SCHEMAS IN DATABASE ${DCR_DB} TO ROLE ACCOUNTADMIN;`,
+  `GRANT INHERITED CALLER USAGE ON ALL PROCEDURES IN DATABASE ${DCR_DB} TO ROLE ACCOUNTADMIN;`,
+  `GRANT INHERITED CALLER USAGE ON ALL FUNCTIONS IN DATABASE ${DCR_DB} TO ROLE ACCOUNTADMIN;`,
+  "GRANT CALLER USAGE ON APPLICATION SAMOOHA_BY_SNOWFLAKE TO ROLE ACCOUNTADMIN;",
+  "",
+  "-- JOIN installs an application, creates a database, and wires up shares:",
+  "GRANT CALLER CREATE APPLICATION      ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER CREATE DATABASE         ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER CREATE SHARE            ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER IMPORT SHARE            ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER MANAGE SHARE TARGET     ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER CREATE LISTING          ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER APPLY ROW ACCESS POLICY ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+  "GRANT CALLER EXECUTE TASK            ON ACCOUNT TO ROLE ACCOUNTADMIN;",
+].join("\n");
+
 function fail(code: string, title: string, cause: string, remediation: string, status = 200) {
   return NextResponse.json(
     {
@@ -79,7 +122,7 @@ export async function POST(request: Request) {
       "An account locator or Snowsight URL will not work here.");
   }
 
-  const DCR = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION";
+  const DCR = `${DCR_DB}.COLLABORATION`;
 
   // Both REVIEW and JOIN use caller's rights so the person's identity and
   // profile are visible to DCR.
@@ -94,22 +137,26 @@ export async function POST(request: Request) {
     const message = e instanceof Error ? e.message : String(e);
     const benign = /already/i.test(message) || /InvitationNotFound/i.test(message);
     if (!benign) {
+      const noCallerGrants = callerGrantsMissing(message);
       return NextResponse.json(
         {
           ok: false,
           operation: "JOIN_COLLABORATION",
           error: {
-            code: "REVIEW_FAILED",
-            title: "Could not review the invitation",
+            code: noCallerGrants ? "CALLER_GRANTS_MISSING" : "REVIEW_FAILED",
+            title: noCallerGrants
+              ? "The app is not allowed to use your privileges yet"
+              : "Could not review the invitation",
             cause: message,
-            remediation:
-              "If a previous Leave was interrupted, the state may be LOCAL_DROP_PENDING — " +
-              "finish it by leaving again, then a fresh invitation reappears.\n\n" +
-              "If the error mentions privileges: the user joining needs SAMOOHA_APP_ROLE. " +
-              "Grant it with: GRANT ROLE SAMOOHA_APP_ROLE TO USER <username>;",
-            sql_fix: null,
+            remediation: noCallerGrants
+              ? CALLER_GRANTS_REMEDIATION
+              : "If a previous Leave was interrupted, the state may be LOCAL_DROP_PENDING — " +
+                "finish it by leaving again, then a fresh invitation reappears.\n\n" +
+                "If the error mentions privileges: the user joining needs SAMOOHA_APP_ROLE. " +
+                "Grant it with: GRANT ROLE SAMOOHA_APP_ROLE TO USER <username>;",
+            sql_fix: noCallerGrants ? CALLER_GRANTS_SQL : null,
             retryable: true,
-            severity: "error",
+            severity: noCallerGrants ? "blocked" : "error",
           },
           error_raw: message,
           duration_ms: Date.now() - started,
@@ -135,7 +182,16 @@ export async function POST(request: Request) {
     let sql_fix: string | null = null;
     let severity = "error";
 
-    if (profileMissing) {
+    if (callerGrantsMissing(message)) {
+      // Checked before the privilege branches below: this error mentions
+      // privileges, so those would otherwise claim it and point at the
+      // wrong fix (granting a role, when the gap is a caller grant).
+      code = "CALLER_GRANTS_MISSING";
+      title = "The app is not allowed to use your privileges yet";
+      remediation = CALLER_GRANTS_REMEDIATION;
+      sql_fix = CALLER_GRANTS_SQL;
+      severity = "blocked";
+    } else if (profileMissing) {
       code = "USER_PROFILE_INCOMPLETE";
       title = "Your user profile is incomplete";
       remediation =

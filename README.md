@@ -45,7 +45,7 @@ An audience overlap and activation workflow for business users who do not write 
 track_a_streamlit/    Streamlit in Snowflake  (14 files, ~640 lines)
 track_b_react/        Next.js 14 on App Runtime / SPCS  (24 files, ~2,600 lines)
 
-91_grants/            Grants for source data and for business users
+91_grants/            Grants for source data, caller grants, and business users
 docs/
   dcr-apps-tutorial.md  Full build tutorial (Bahasa Indonesia)
   COMPARISON.md         Track A vs Track B, measured from building both
@@ -92,8 +92,11 @@ Do not "fix" it by routing it through `INVOKE` — joining will break.
 - Snowflake account with Data Clean Rooms installed and the standard templates
   registered (`standard_audience_overlap_v0`,
   `standard_audience_overlap_activation_v0`)
-- `ACCOUNTADMIN` for the one-time setup
+- `ACCOUNTADMIN` for the one-time setup (or `MANAGE CALLER GRANTS` for step 3)
 - Snowflake CLI (`snow`) with a configured connection
+- Everyone who will **join** a collaboration needs `SAMOOHA_APP_ROLE` and a
+  profile with `first_name`, `last_name` and `email`. A `TYPE = SERVICE` user can
+  never qualify, so joining is always a person.
 - Track B only: `FEATURE_SNOWFLAKE_APPS` enabled, App Runtime set up, and
   `BIND SERVICE ENDPOINT`
 
@@ -126,7 +129,29 @@ data you intend to share. Edit and run:
 snow sql -f 91_grants/grants_source_data.sql -c <your-connection>
 ```
 
-### 3. Deploy a UI
+### 3. Allow the app to join (Track B only)
+
+Skip this for Track A. A Snowflake App Runtime service runs with **restricted**
+caller's rights, so the caller's privileges are unusable until an administrator
+declares them as caller grants. Without this, Review and join fails with an error
+that blames a missing function rather than a missing privilege:
+
+```
+Unknown user-defined function SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW.
+This executable runs with restricted caller's rights.
+```
+
+```bash
+snow sql -f 91_grants/grants_caller_rights.sql -c <your-connection>
+```
+
+Grant to the role that **owns the service** (the `owner` column of
+`SHOW APPLICATION SERVICES IN ACCOUNT`), not to the user. These grants confer no
+privilege of their own; they only unblock privileges the caller already holds.
+They do apply to every executable owned by that role, so in production prefer a
+dedicated owner role over `ACCOUNTADMIN`.
+
+### 4. Deploy a UI
 
 **Track A — Streamlit in Snowflake:**
 
@@ -145,11 +170,14 @@ cd track_b_react && npm install && bash deploy.sh
 First deploy is about 4 minutes; roughly 2 of those are endpoint provisioning
 alone. Worth knowing before a live demo.
 
-### 4. Grant your business users
+### 5. Grant your business users
 
 ```bash
 snow sql -f 91_grants/grants_business_users.sql -c <your-connection>
 ```
+
+Edit the file first: the `GRANT ROLE DCR_BUSINESS_USER TO USER ...` line is
+commented out because `GRANT` will not evaluate `CURRENT_USER()`.
 
 ---
 
@@ -209,16 +237,19 @@ Exercised end to end on two accounts in the same region:
 
 ## Traps worth knowing
 
-Learned the hard way while building this; all six are handled in the code.
+Learned the hard way while building this; all of them are handled in the code.
 
 | Trap | Consequence |
 |---|---|
-| Joining requires an identifiable *person* | `JOIN` accepts legal terms, so DCR demands `first_name`, `last_name` and `email` on the acting user. An SPCS service identity is not a user object and cannot have them; a business user has them but deliberately lacks `SAMOOHA_APP_ROLE`. **No app can join** — it is a one-time admin act in a worksheet |
-| Owner auto-join does not work | The DCR auto-join task runs `JOIN` inside a procedure, so it dies on `SYSTEM$ACCEPT_LEGAL_TERMS` and leaves the collaboration at `INSTALLATION_FAILED` |
+| A SAR app needs **caller grants** before it can join | The service only ever gets *restricted* caller's rights, so the caller's privileges are unusable until declared. The failure reads `Unknown user-defined function ...COLLABORATION.REVIEW`, which looks like a missing object, not a missing grant. Fix: `91_grants/grants_caller_rights.sql` |
+| Caller grants go to the **service owner role** | Not to the user, and not `TO APPLICATION` — that form is for Native Apps. `GRANT CALLER USAGE ON DATABASE` alone is also not enough: procedures and functions are separate object types |
+| Joining requires an identifiable *person* | `JOIN` accepts legal terms, so DCR demands `first_name`, `last_name` and `email` on the acting user. An SPCS service identity is not a user object and cannot have them, so the app must join as the **caller** |
+| Owner auto-join via `auto_join_warehouse` only works for a real user | The task inherits the identity that called `INITIALIZE`. From a service identity it cannot accept legal terms; from a person it works. Track B therefore chains an explicit caller's-rights `JOIN` onto create instead |
 | `LEAVE` is rejected from `INSTALLATION_FAILED` | Recover with `REVIEW` again, then `JOIN`. `LEAVE` only works from `LOCAL_DROP_PENDING` / `LEAVING` |
 | Secondary roles are enabled on the session | DCR refuses to register or link data. `USE SECONDARY ROLES NONE` fixes it — but `USE` is barred inside a procedure, so it must be set on the session. Both UIs do this at startup |
 | `COLLABORATION.JOIN` is side-effecting | Cannot run in a stored procedure; must be session level |
-| Auto-join can fail **silently** | Status stays `CREATED` with `auto_join.phase = failed` in `DETAILS` |
+| Auto-join can fail **silently** | Status stays `CREATED` with `auto_join.phase = failed` in `DETAILS`. Read `DETAILS`, not just `STATUS` |
+| A non-NULL `COLLABORATION_NAME` does **not** mean joined | For the owner it is populated at `INITIALIZE`, long before any join. Only `GET_STATUS` tells you the truth |
 | `SHARED_WITH` is the local/partner discriminator | View-name prefix is *not* reliable — in a single-account test both get `PROVIDER.` |
 | Every collaborator needs a role | `CREATE_COLLABORATION` fails with "collaborators … have no role" |
 | `ADMIN.CHECK_PRIVILEGES` issues a `USE` statement | Also cannot run in a stored procedure |

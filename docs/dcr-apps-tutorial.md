@@ -17,14 +17,15 @@ menulis SQL dan tanpa menulis YAML**.
 2. [Apa yang dibangun](#2-apa-yang-dibangun)
 3. [Arsitektur singkat](#3-arsitektur-singkat)
 4. [Prasyarat](#4-prasyarat)
+   - [Role dan user yang dibutuhkan](#43-role-dan-user-yang-dibutuhkan)
+   - [Caller grants — wajib untuk Track B](#44-caller-grants--wajib-untuk-track-b)
 5. [Bagian A — Deploy façade (backend)](#bagian-a--deploy-façade-backend)
-6. [Bagian B — Deploy aplikasi Streamlit](#bagian-b--deploy-aplikasi-streamlit)
 6. [Bagian B — Deploy aplikasi Streamlit](#bagian-b--deploy-aplikasi-streamlit)
 7. [Bagian B2 — Deploy aplikasi React di SPCS](#bagian-b2--deploy-aplikasi-react-di-spcs-track-b)
 8. [Bagian C — Menggunakan aplikasi (alur lengkap)](#bagian-c--menggunakan-aplikasi-alur-lengkap)
-8. [Bagian D — Verifikasi kebenaran hasil](#bagian-d--verifikasi-kebenaran-hasil)
-9. [Troubleshooting](#troubleshooting)
-10. [Lampiran](#lampiran-a--daftar-30-operasi-façade)
+9. [Bagian D — Verifikasi kebenaran hasil](#bagian-d--verifikasi-kebenaran-hasil)
+10. [Troubleshooting](#troubleshooting)
+11. [Lampiran](#lampiran-a--daftar-30-operasi-façade)
 
 ---
 
@@ -175,6 +176,12 @@ DCR_CONSOLE
 | Edisi Snowflake | Standard+ untuk overlap, **Enterprise+ untuk aktivasi** | Upgrade edisi |
 | Akun berbayar | — | Trial dan reader account tidak didukung |
 | Snowflake CLI | `snow --version` (≥ 3.20) | `pip install snowflake-cli` |
+| Profil user lengkap | `DESCRIBE USER <username>` → `first_name`, `last_name`, `email` terisi | `ALTER USER <username> SET first_name='…', last_name='…', email='…'` |
+
+> **Soal profil user.** Ini bukan formalitas. `JOIN` menerima syarat hukum, dan
+> Snowflake menolak melakukannya untuk identitas yang tidak bisa disebut namanya.
+> User `TYPE = SERVICE` **tidak akan pernah** memenuhi syarat ini — jadi yang
+> melakukan join selalu manusia. Konsekuensinya dibahas di Lampiran B.
 
 ### 4.2 Identitas akun
 
@@ -191,7 +198,79 @@ SELECT CURRENT_USER() AS MY_USER;
 > tidak ada pesan error saat pembuatan. Aplikasi ini menolak format yang salah di
 > awal.
 
-### 4.3 Dipasang di kedua akun
+### 4.3 Role dan user yang dibutuhkan
+
+Ada tiga peran yang berbeda, dan sering tertukar. Yang paling sering jadi sumber
+error adalah mencampur kolom 2 dan 3.
+
+| Peran | Siapa | Butuh apa |
+|---|---|---|
+| **Admin setup** | Sekali saja, saat deploy | `ACCOUNTADMIN`, atau role dengan `MANAGE CALLER GRANTS` untuk langkah caller grants |
+| **Owner service** (Track B) | Role yang **memiliki** application service — bukan user | Penerima *caller grants*. Lihat kolom `owner` pada `SHOW APPLICATION SERVICES IN ACCOUNT` |
+| **User bisnis** | Orang yang memakai app sehari-hari | `DCR_BUSINESS_USER` (dari `grants_business_users.sql`), plus `SAMOOHA_APP_ROLE` dan profil lengkap bila ia perlu **join** |
+
+Urutan script yang harus dijalankan per akun:
+
+```bash
+snow sql -f 00_facade/00_setup_role_and_db.sql      # role + database façade
+snow sql -f 91_grants/grants_source_data.sql        # akses ke data yang dibagikan
+snow sql -f 91_grants/grants_caller_rights.sql      # HANYA Track B — lihat 4.4
+snow sql -f 91_grants/grants_business_users.sql     # akses user bisnis
+```
+
+### 4.4 Caller grants — wajib untuk Track B
+
+Lewati bagian ini kalau Anda hanya memakai Track A (Streamlit).
+
+Aplikasi Snowflake App Runtime **tidak pernah** mendapat caller's rights biasa; ia
+selalu mendapat **restricted caller's rights**. Artinya privilege user yang login
+tidak otomatis bisa dipakai — administrator harus mendeklarasikan lebih dulu
+privilege mana yang boleh "dipinjam" oleh service. Deklarasi itulah *caller grants*.
+
+Selama itu belum ada, prosedur DCR tidak ter-*resolve* sama sekali, dan errornya
+**menyesatkan** karena terlihat seperti objek yang tidak ada:
+
+```
+SQL compilation error: Unknown user-defined function
+SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW.
+This executable runs with restricted caller's rights. The owner role ACCOUNTADMIN
+must have CALLER USAGE or any other CALLER privilege granted on DATABASE
+SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.
+```
+
+Menambah `SAMOOHA_APP_ROLE` **tidak** menyelesaikan ini. Yang kurang bukan role.
+
+```bash
+snow sql -f 91_grants/grants_caller_rights.sql
+```
+
+Tiga hal yang mudah salah:
+
+1. **Penerimanya adalah role pemilik service**, bukan user, dan bukan
+   `TO APPLICATION` — bentuk terakhir itu untuk Native App, bukan SAR app.
+2. **`GRANT CALLER USAGE ON DATABASE` saja tidak cukup.** Procedure dan function
+   adalah tipe objek terpisah dan butuh `GRANT INHERITED CALLER USAGE` sendiri.
+   Ini persis yang dikeluhkan pesan error di atas.
+3. **`JOIN` membangun objek nyata**, bukan sekadar update metadata: ia menginstal
+   aplikasi `SFDCR_<collab>`, membuat database `SFDCR_LOCAL_<collab>`, dan
+   merangkai share serta listing. Masing-masing butuh caller grant account-level
+   sendiri (`CREATE APPLICATION`, `CREATE DATABASE`, `CREATE SHARE`,
+   `IMPORT SHARE`, `MANAGE SHARE TARGET`, `CREATE LISTING`,
+   `APPLY ROW ACCESS POLICY`). Kurang satu, `JOIN` gagal di tengah jalan dan
+   meninggalkan kolaborasi dalam status yang `LEAVE` pun menolak.
+
+Verifikasi:
+
+```sql
+SHOW CALLER GRANTS TO ROLE ACCOUNTADMIN;   -- ganti dengan role pemilik service
+```
+
+> **Catatan keamanan.** Caller grants **tidak memberi privilege baru** — ia hanya
+> membuka privilege yang sudah dimiliki user. Tapi cakupannya adalah **semua**
+> executable milik role itu, bukan hanya app ini. Untuk produksi, sebaiknya
+> service dimiliki role khusus, bukan `ACCOUNTADMIN`.
+
+### 4.5 Dipasang di kedua akun
 
 DCR bekerja per akun. Aplikasi ini **harus di-deploy di kedua akun** (provider dan
 consumer). Setiap instance hanya bisa bertindak sebagai akun tempat ia berjalan.
@@ -521,19 +600,32 @@ GRANT USAGE ON APPLICATION SERVICE
 GRANT USAGE ON WAREHOUSE APP_WH                         TO ROLE DCR_BUSINESS_USER;
 ```
 
-App berjalan dengan **owner's rights**: semua panggilan DCR dieksekusi sebagai
-role app, apa pun role user yang login. **User bisnis tidak perlu — dan tidak
-boleh — diberi `SAMOOHA_APP_ROLE`.**
+App berjalan dengan **owner's rights** untuk hampir semua operasi: panggilan DCR
+dieksekusi sebagai role app, apa pun role user yang login.
+
+**Kecualinya `JOIN`.** Operasi itu menerima syarat hukum, yang menuntut manusia,
+jadi ia berjalan sebagai **caller**. Karena itu user yang akan menerima undangan
+**perlu** `SAMOOHA_APP_ROLE` — sudah termasuk dalam script di atas — dan profil
+yang lengkap. User yang tidak pernah perlu join tidak membutuhkannya.
+
+Ini tetap aman: `SAMOOHA_APP_ROLE` sendiri tidak mem-*bypass* façade. Hanya satu
+jalur yang memakai caller's rights (`REVIEW` + `JOIN`); sisanya tetap lewat
+`DCR_CONSOLE.APP.INVOKE` dengan owner's rights.
+
+> **Jangan lupa caller grants.** Grant di atas belum cukup untuk Track B. Tanpa
+> `91_grants/grants_caller_rights.sql`, tombol **Review and join** gagal dengan
+> pesan yang menyesatkan soal *"Unknown user-defined function"*. Lihat §4.4.
 
 > Saat mencabut akses, gunakan `REVOKE USAGE ON APPLICATION SERVICE` — **bukan**
 > `REVOKE ON SERVICE`. Yang kedua menyasar objek SPCS yang berbeda dan tidak
 > berefek apa pun, tanpa pesan error.
 
-Akses dikontrol di **dua lapis independen**, keduanya harus lolos:
+Akses dikontrol di **tiga lapis independen**, semuanya harus lolos:
 
 | Lapis | Menentukan | Cara |
 |---|---|---|
 | Grant application service | Bisa membuka URL app atau tidak | `GRANT USAGE ON APPLICATION SERVICE` |
+| Caller grants (Track B) | Boleh tidak app memakai privilege user | `GRANT CALLER … TO ROLE <owner service>` |
 | Privilege kolaborasi DCR | Kolaborasi mana yang terlihat | `ADMIN.GRANT_PRIVILEGE_ON_OBJECT_TO_ROLE` |
 
 User dengan grant app tapi tanpa privilege kolaborasi akan melihat **daftar
@@ -832,19 +924,39 @@ Halaman **2. Create Collaboration**.
 
 4. **Activation destinations** — siapa yang boleh menerima hasil aktivasi. Ini
    daftar terpisah dari analysis runner.
-5. Centang **Auto-join**, isi warehouse (mis. `APP_WH`) → **Create collaboration**.
+5. **Buat kolaborasi.**
+
+   Perilakunya berbeda sedikit antar track, dan keduanya berakhir sama:
+
+   - **Track A (Streamlit):** centang **Auto-join**, isi warehouse (mis. `APP_WH`).
+     `INITIALIZE` dipanggil dengan argumen kedua, dan DCR membuat task
+     `<collab>_<hash>_OWNER_AUTO_JOIN` yang melakukan join untuk Anda.
+   - **Track B (React):** tidak ada centang apa pun. Setelah kolaborasi terbuat,
+     app langsung menjalankan `JOIN` sebagai Anda (caller's rights) dan
+     menampilkan progresnya. Tidak perlu kembali ke worksheet.
 
    Provisioning butuh **3–5 menit**. Status berjalan `CREATING → JOINING → JOINED`.
 
-   > **Auto-join bisa gagal tanpa suara.** Pernah terjadi: panggilan
+   > **Kenapa Track B tidak memakai `auto_join_warehouse`.** Task auto-join
+   > mewarisi identitas yang memanggil `INITIALIZE`. Di Track B itu identitas
+   > service SPCS, yang bukan objek user dan tidak bisa menerima syarat hukum —
+   > jadi task-nya pasti gagal. `JOIN` eksplisit sebagai caller lebih tepat, dan
+   > bonusnya sinkron sehingga progresnya terlihat di UI.
+
+   > **Auto-join bisa gagal tanpa suara.** Pernah terjadi di Track A: panggilan
    > `INITIALIZE` sukses, tapi task auto-join gagal, dan status berhenti di
    > `CREATED` dengan kegagalannya terkubur di dalam JSON DETAILS:
    > ```json
    > {"auto_join": {"enabled": false, "failure_summary": "Unable to auto join...", "phase": "failed"}}
    > ```
-   > Kalau status berhenti di `CREATED`, owner harus JOIN manual. Façade
-   > menyediakan operasi `ENSURE_JOINED` yang memeriksa kondisi ini dan memanggil
-   > JOIN bila perlu.
+   > Karena itu **selalu baca `DETAILS`, jangan hanya `STATUS`.** Kalau status
+   > berhenti di `CREATED`, owner harus JOIN manual. Façade menyediakan operasi
+   > `ENSURE_JOINED` yang memeriksa kondisi ini dan memanggil JOIN bila perlu.
+
+   > **`COLLABORATION_NAME` yang terisi bukan berarti sudah join.** Untuk owner,
+   > kolom itu terisi sejak `INITIALIZE`, jauh sebelum join terjadi. Satu-satunya
+   > sumber kebenaran adalah `GET_STATUS`, atau keberadaan aplikasi
+   > `SFDCR_<collab>` dan database `SFDCR_LOCAL_<collab>`.
 
 ### Langkah 4 — Join kolaborasi (akun consumer)
 
@@ -854,14 +966,22 @@ Halaman **3. Invitations**. Undangan muncul di daftar.
 2. Isi **nama lokal** (boleh berbeda dari nama aslinya).
 3. Klik **Review and join**. Butuh 1–2 menit.
 
-> **Detail teknis.** `REVIEW` dan `JOIN` dijalankan **di level sesi**, bukan lewat
-> façade. Alasannya: `JOIN` memanggil `SYSTEM$ACCEPT_LEGAL_TERMS`, dan Snowflake
-> menolak fungsi ber-*side effect* di dalam stored procedure:
-> ```
-> SQL compilation error: Query called from a stored procedure contains a function
-> with side effects [SYSTEM$ACCEPT_LEGAL_TERMS].
-> ```
+> **Detail teknis.** `REVIEW` dan `JOIN` dijalankan **di level sesi** sebagai
+> **caller**, bukan lewat façade. Alasannya berlapis dua:
+>
+> 1. `JOIN` memanggil `SYSTEM$ACCEPT_LEGAL_TERMS`, dan Snowflake menolak fungsi
+>    ber-*side effect* di dalam stored procedure:
+>    ```
+>    SQL compilation error: Query called from a stored procedure contains a function
+>    with side effects [SYSTEM$ACCEPT_LEGAL_TERMS].
+>    ```
+> 2. Menerima syarat hukum menuntut user dengan nama dan email. Identitas service
+>    yang dipakai owner's rights bukan objek user, jadi tidak mungkin memenuhinya.
+>
 > Di Streamlit ini transparan karena statement Streamlit berjalan di level sesi.
+> Di Track B, route `/api/direct` yang menanganinya — dan route itu **butuh caller
+> grants** (§4.4), kalau tidak ia gagal dengan pesan soal *"Unknown user-defined
+> function"* yang sama sekali tidak menyinggung privilege.
 >
 > **Konsekuensi penting:** role yang menjalankan JOIN **memiliki** semua objek
 > yang dibuat oleh join itu (`SFDCR_<collab>` dan `SFDCR_LOCAL_<collab>`). Jadi
@@ -1041,6 +1161,8 @@ lengkap dengan SQL perbaikannya bila ada. Tabel di bawah untuk rujukan.
 
 | Gejala | Penyebab | Solusi |
 |---|---|---|
+| `Unknown user-defined function SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW` — disertai kalimat *"runs with restricted caller's rights"* | **Bukan** fungsi yang hilang, dan **bukan** soal `SAMOOHA_APP_ROLE`. Caller grants belum ada, jadi privilege user tidak bisa dipakai app | Jalankan `91_grants/grants_caller_rights.sql` ke role **pemilik service**, lihat §4.4 |
+| `Review and join` gagal padahal user sudah punya `SAMOOHA_APP_ROLE` | Sama seperti di atas — role sudah benar, caller grants yang belum | Idem |
 | `Grant not executed: Insufficient privileges` saat link | Role tidak punya `WITH GRANT OPTION` pada data sumber | Jalankan grant di Bagian A-5 |
 | `DatasetReferenceUsageWithGrantOptionMissingError` | Kurang `REFERENCE_USAGE ... WITH GRANT OPTION` | `GRANT REFERENCE_USAGE ON DATABASE <db> TO ROLE <role> WITH GRANT OPTION` |
 | `ReferenceUsageGrantMissingException` saat JOIN | Normal saat pertama kali share sebuah database | Grant ke **share** yang disebut di pesan error. **Jangan** ke `SAMOOHA_BY_SNOWFLAKE_APP_SHARE` (itu milik v1 dan tidak ada di v2) |
@@ -1049,7 +1171,8 @@ lengkap dengan SQL perbaikannya bila ada. Tabel di bawah untuk rujukan.
 | `Database 'SFDCR_LOCAL_<collab>' does not exist` | JOIN dijalankan role lain, yang kemudian memiliki objeknya | Biarkan aplikasi yang JOIN, atau jalankan script adopsi |
 | `Unauthorized columns: p1.HASHED_MSISDN` | Memakai nama kolom asli, bukan nama hasil rename | Pakai nama yang ditampilkan di Link Data (`HASHED_PHONE_SHA256`) |
 | `no role` saat create collaboration | Ada kolaborator tanpa peran | Tambahkan sebagai data provider dengan offering kosong |
-| Status berhenti di `CREATED`, tidak pernah `JOINED` | Auto-join gagal tanpa suara | Owner JOIN manual, atau pakai operasi `ENSURE_JOINED` |
+| Status berhenti di `CREATED`, tidak pernah `JOINED` | Auto-join gagal tanpa suara, **atau** `INITIALIZE` dipanggil tanpa `auto_join_warehouse` sehingga task-nya tidak pernah dibuat | Baca `DETAILS`. Owner JOIN manual, atau pakai operasi `ENSURE_JOINED` |
+| App bilang "already joined" padahal belum | UI membaca `COLLABORATION_NAME` yang tidak NULL; untuk owner kolom itu terisi sejak `INITIALIZE` | Percayai `GET_STATUS`, atau cek keberadaan `SFDCR_<collab>` |
 | `CollaborationInvitationNotFound` padahal undangan terlihat | Sudah pernah join, **atau** `LEAVE` tertahan di `LOCAL_DROP_PENDING` | Cek `GET_STATUS`. Kalau `LOCAL_DROP_PENDING`, panggil `LEAVE` sekali lagi untuk menuntaskan; undangan baru akan muncul kembali |
 | Hasil overlap NULL / disuppress | Kurang dari 5 baris cocok — jaminan privasi | Perluas audiens, kurangi filter, hapus satu dimensi group-by |
 | Aktivasi sukses tapi tabel tidak ada | Belum diimpor | Halaman **Activation Inbox** → Import and flatten |
@@ -1116,7 +1239,7 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 | `REGISTER_DATA_OFFERING` * | **`COLLABORATION.JOIN`** — memanggil `SYSTEM$ACCEPT_LEGAL_TERMS` |
 | `INITIALIZE` | **`ADMIN.CHECK_PRIVILEGES`** — menjalankan statement `USE` |
 | `LINK_DATA_OFFERING`, `LINK_LOCAL_DATA_OFFERING` * | **`USE SECONDARY ROLES NONE`** — statement `USE` |
-| `RUN` (overlap dan aktivasi) | **Auto-join task DCR** — menjalankan JOIN, jadi kena batasan yang sama |
+| `RUN` (overlap dan aktivasi) | **Auto-join task DCR** — menjalankan JOIN sebagai identitas pemanggil `INITIALIZE`, jadi gagal bila itu identitas service |
 | `VIEW_*` (semua) | |
 | `PROCESS_ACTIVATION` | |
 | `TEARDOWN`, `LEAVE`, `GET_STATUS` | |
@@ -1125,10 +1248,9 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 sudah mematikan secondary roles. Jadi prasyaratnya berada di luar façade
 meskipun operasinya sendiri di dalam. Lihat baris `USE SECONDARY ROLES NONE`.
 
-### JOIN tidak cukup "di level sesi" — harus manusia
+### JOIN harus manusia — dan karena itu butuh caller grants
 
-`JOIN` punya syarat kedua yang lebih keras daripada nest-safety, dan ini menutup
-semua jalur dari app yang ter-deploy:
+`JOIN` punya syarat kedua yang lebih keras daripada nest-safety:
 
 DCR menuntut acting user punya `first_name`, `last_name`, dan `email`, karena
 JOIN menerima syarat hukum dan perjanjian butuh orang yang bisa disebut namanya.
@@ -1136,13 +1258,18 @@ JOIN menerima syarat hukum dan perjanjian butuh orang yang bisa disebut namanya.
 | Model | Punya privilege DCR? | Punya profil user? | JOIN |
 |---|---|---|---|
 | Owner's rights (identitas service SPCS) | ya | **tidak** — bukan objek user, `ALTER USER` tidak ada sasarannya | gagal saat instalasi → 504 |
-| Caller's rights (business user) | **tidak** — sengaja tanpa `SAMOOHA_APP_ROLE` | ya | gagal karena privilege |
+| Caller's rights, tanpa caller grants | privilege ada tapi **terkunci** | ya | gagal: `Unknown user-defined function …REVIEW` |
+| Caller's rights + `SAMOOHA_APP_ROLE` + caller grants | ya | ya | **berhasil** |
 
-Kesimpulannya JOIN adalah **tindakan administratif satu kali per kolaborasi**,
-dijalankan orang di worksheet — bukan aktivitas business user. Halaman
-Invitations di Track B karena itu tidak punya tombol Join; ia menampilkan spec
-untuk ditelaah lalu menyerahkan SQL siap-copy. Ini batasan platform, bukan fitur
-yang belum dibuat.
+Jadi JOIN memang tidak bisa dijalankan dengan owner's rights, tapi **bisa**
+dijalankan dari app yang ter-deploy — lewat caller's rights, asalkan tiga syarat
+di baris terakhir tabel terpenuhi. Track B melakukannya di route `/api/direct`,
+baik dari halaman Invitations maupun langsung setelah Create Collaboration.
+
+Yang perlu dicatat: karena JOIN berjalan sebagai caller, **role aktif user itulah
+yang memiliki** `SFDCR_<collab>` dan `SFDCR_LOCAL_<collab>`. Kalau role itu
+berbeda dari role app, operasi berikutnya bisa kena error privilege — perbaikannya
+`91_grants/adopt_joined_collaboration.sql`.
 
 Yang tidak aman harus dijalankan **di level sesi** oleh lapisan UI. Di Streamlit
 in Snowflake ini otomatis. Di React/SPCS, handler API harus memanggil `CALL`

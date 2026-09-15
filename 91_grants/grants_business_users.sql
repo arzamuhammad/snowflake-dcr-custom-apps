@@ -9,6 +9,14 @@
 -- as the CALLER (the person logged in), using caller's rights. For this to
 -- work, the caller needs SAMOOHA_APP_ROLE — see the grant below.
 --
+-- >>> THIS FILE IS NOT SUFFICIENT ON ITS OWN, FOR TRACK B <<<
+-- A Snowflake App Runtime service gets RESTRICTED caller's rights, so the
+-- caller's privileges stay unusable until an administrator declares them as
+-- caller grants. Run 91_grants/grants_caller_rights.sql as well, once per
+-- account, or Review and join fails with a misleading "Unknown user-defined
+-- function SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW". Track A
+-- (Streamlit) does not need it.
+--
 -- This is safe: SAMOOHA_APP_ROLE alone does not bypass the facade. The app
 -- only offers one caller's-rights path (REVIEW + JOIN), and all other
 -- operations still go through DCR_CONSOLE.APP.INVOKE with owner's rights.
@@ -19,6 +27,9 @@
 --   1. App grant           — can this role open the app at all?
 --   2. DCR collaboration   — which collaborations can it see and query?
 -- A user with the app grant but no collaboration privilege gets an empty list.
+--
+-- Track B adds a third layer, which is account-wide rather than per user:
+-- caller grants. See grants_caller_rights.sql.
 -- ============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -66,9 +77,12 @@ GRANT ROLE SAMOOHA_APP_ROLE TO ROLE DCR_BUSINESS_USER;
 -- a literal: TO USER CURRENT_USER() is a syntax error.
 --
 -- Also ensure each user's profile is complete (first_name, last_name, email),
--- because JOIN will reject a user without one.
+-- because JOIN will reject a user without one. Check with DESCRIBE USER, and
+-- note that a TYPE = SERVICE user can never satisfy this -- joining has to be a
+-- person.
 -- ---------------------------------------------------------------------------
 -- GRANT ROLE DCR_BUSINESS_USER TO USER <USERNAME>;
+-- ALTER USER <USERNAME> SET first_name = '...', last_name = '...', email = '...';
 
 -- ---------------------------------------------------------------------------
 -- Optional: app-level permission tier. Narrows what the UI offers; DCR remains

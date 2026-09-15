@@ -221,16 +221,20 @@ export const setAppRole = (username: string, app_role: string, notes?: string) =
  * SYSTEM$ACCEPT_LEGAL_TERMS. Snowflake refuses side-effecting functions inside a
  * stored procedure, so this bypasses DCR_CONSOLE.APP.INVOKE by design.
  *
- * NOT CALLED BY THE UI, deliberately — and not dead code either. Accepting legal
- * terms additionally requires the acting user to have first_name, last_name and
- * email. A deployed app has neither option available: owner's rights acts as an
- * SPCS managed service identity, which is not a user object and cannot be given
- * a profile, while caller's rights acts as a business user who deliberately does
- * not hold SAMOOHA_APP_ROLE. So the Invitations page shows copy-ready SQL
- * instead, and this stays as a working path for an operator who holds both the
- * profile and the privileges.
+ * Runs under CALLER'S rights, because accepting legal terms additionally requires
+ * the acting user to have first_name, last_name and email. Owner's rights acts as
+ * an SPCS managed service identity, which is not a user object and cannot be
+ * given a profile, so joining can never work there.
  *
- * Consequence worth knowing if you do use it: the role that runs JOIN OWNS the
+ * Used by the Invitations page and, for the owner, chained onto Create
+ * Collaboration. The owner has no invitation, so REVIEW fails with
+ * InvitationNotFound; /api/direct treats that as benign and proceeds to JOIN.
+ *
+ * The caller must hold SAMOOHA_APP_ROLE and a complete profile. JOIN is
+ * asynchronous: a successful response means provisioning started, so confirm the
+ * terminal state with GET_STATUS.
+ *
+ * Consequence worth knowing: the role that runs JOIN OWNS the
  * objects the join creates (SFDCR_<collab> and SFDCR_LOCAL_<collab>), which
  * determines who can link and run later.
  */

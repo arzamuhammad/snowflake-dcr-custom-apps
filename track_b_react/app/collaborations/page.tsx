@@ -18,7 +18,7 @@
 
 import { useEffect, useState } from "react";
 
-import { createCollaboration, getStatus, healthCheck, listOfferings } from "@/lib/facade";
+import { createCollaboration, getStatus, healthCheck, listOfferings, reviewAndJoin } from "@/lib/facade";
 import type { DcrError } from "@/lib/types";
 
 import { Alert, Card, CopyBlock, ErrorPanel, PageHeader, Spinner, StatusBadge } from "@/components/ui";
@@ -56,6 +56,14 @@ export default function CreateCollaborationPage() {
   const [created, setCreated] = useState<string | null>(null);
   const [statusRows, setStatusRows] = useState<Record<string, unknown>[]>([]);
   const [polling, setPolling] = useState(false);
+
+  // Owner join is chained onto create, so it needs its own outcome separate from
+  // `error`: creating can succeed while joining fails, and the screen must say so.
+  const [join, setJoin] = useState<{
+    phase: "idle" | "joining" | "joined" | "failed";
+    error?: DcrError;
+    raw?: string;
+  }>({ phase: "idle" });
 
   useEffect(() => {
     healthCheck().then((r) => {
@@ -105,24 +113,55 @@ export default function CreateCollaborationPage() {
     setBusy(true);
     setError(null);
     setCreated(null);
+    setJoin({ phase: "idle" });
     const r = await createCollaboration(buildConfig());
-    if (r.ok) {
-      setCreated(r.data.collaboration_name);
-      poll(r.data.collaboration_name);
-    } else {
+    if (!r.ok) {
       setError(r.error);
       setErrorRaw(r.error_raw);
+      setBusy(false);
+      return;
     }
+    const collab = r.data.collaboration_name;
+    setCreated(collab);
     setBusy(false);
+    await joinAsOwner(collab);
+    poll(collab);
+  }
+
+  /**
+   * Join as the owner, immediately after create.
+   *
+   * Routed through /api/direct, which uses CALLER'S rights. That is the whole
+   * point: JOIN accepts legal terms, and Snowflake requires an identifiable user
+   * with first name, last name and email to do that. The facade route runs as the
+   * SPCS service identity, which is not a user object and cannot have a profile,
+   * so joining from there is impossible — this is the only path that works.
+   *
+   * The owner has no invitation to review, so /api/direct's REVIEW step is
+   * expected to fail with InvitationNotFound; that route already treats it as
+   * benign and proceeds to JOIN.
+   *
+   * DCR's JOIN is asynchronous: success here means "accepted and provisioning",
+   * not "joined". poll() is what confirms the terminal state.
+   */
+  async function joinAsOwner(collab: string) {
+    const ownerAccount = collaborators.find((c) => c.alias === owner)?.account ?? "";
+    setJoin({ phase: "joining" });
+    const j = await reviewAndJoin({
+      source_name: collab,
+      owner_account: ownerAccount,
+      local_name: collab,
+    });
+    if (j.ok) setJoin({ phase: "joined" });
+    else setJoin({ phase: "failed", error: j.error, raw: j.error_raw });
   }
 
   /**
    * Poll the collaborators' statuses.
    *
-   * Read-only on purpose. Earlier this called ENSURE_JOINED when it saw a stalled
-   * CREATED, but joining cannot succeed from here at all: it accepts legal terms,
-   * which requires a user profile the app's service identity cannot have. The
-   * screen reports what it sees and hands over the SQL instead.
+   * Read-only on purpose. joinAsOwner() has already been awaited by the time this
+   * runs, so there is nothing left to trigger here — this only observes. A stalled
+   * CREATED therefore means the join itself failed, which joinAsOwner() reports.
    *
    * Matching is exact. "JOINED" as a substring also matches "JOINING", which is
    * how a still-provisioning collaboration gets mistaken for a finished one.
@@ -345,13 +384,26 @@ export default function CreateCollaborationPage() {
       </Card>
 
       <Card title="4. Review and create">
-        <Alert kind="warn" title="You must join manually after this completes">
-          Auto-join is not offered, because it does not work: the owner&apos;s join runs inside a
-          background task, and <code>SYSTEM$ACCEPT_LEGAL_TERMS</code> cannot be called from a stored
-          procedure. It fails and leaves the collaboration at <code>INSTALLATION_FAILED</code>.
-          Joining also requires a user profile with first name, last name and email, which a service
-          identity cannot have — so it has to be a person, in a worksheet. The SQL appears below once
-          the collaboration is created.
+        <Alert kind="info" title="You will be joined automatically, as yourself">
+          Creating runs as the app&apos;s own identity, but the join that follows runs as{" "}
+          <strong>you</strong>. It has to: joining accepts legal terms, and Snowflake only lets an
+          identifiable user do that. Two things must therefore be true of your account, or the join
+          fails while the collaboration itself succeeds:
+          <ul style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+            <li>
+              your profile has first name, last name and email set —{" "}
+              <code>DESCRIBE USER &lt;you&gt;</code>
+            </li>
+            <li>
+              you hold <code>SAMOOHA_APP_ROLE</code> —{" "}
+              <code>GRANT ROLE SAMOOHA_APP_ROLE TO USER &lt;you&gt;;</code>
+            </li>
+          </ul>
+          <div style={{ marginTop: 8 }}>
+            Your active role will own the objects the join creates (
+            <code>SFDCR_&lt;collab&gt;</code> and <code>SFDCR_LOCAL_&lt;collab&gt;</code>), which
+            decides who can link offerings and run analyses later.
+          </div>
         </Alert>
 
         <details style={{ marginTop: 12 }}>
@@ -364,7 +416,7 @@ export default function CreateCollaborationPage() {
           {busy ? "Creating…" : "Create collaboration"}
         </button>
         <div className="hint" style={{ marginTop: 6 }}>
-          Provisioning takes roughly 3–5 minutes.
+          Creating, then joining, then provisioning — roughly 3–5 minutes in total.
         </div>
       </Card>
 
@@ -373,7 +425,11 @@ export default function CreateCollaborationPage() {
       {created ? (
         <Card title={`Provisioning ${created}`}>
           <div className="flex" style={{ marginBottom: 10 }}>
-            {polling ? <Spinner label="Polling status…" /> : <span className="badge ok">Done polling</span>}
+            {join.phase === "joining" ? <Spinner label="Joining as owner…" /> : null}
+            {polling ? <Spinner label="Polling status…" /> : null}
+            {!polling && join.phase !== "joining" ? (
+              <span className="badge ok">Done polling</span>
+            ) : null}
           </div>
           {statusRows.length ? (
             <div className="table-wrap">
@@ -394,34 +450,46 @@ export default function CreateCollaborationPage() {
               </table>
             </div>
           ) : null}
-          <Alert kind="warn" title="Now join as the owner — this app cannot do it">
-            The collaboration exists, but you are not in it until you join, and joining accepts
-            legal terms on your behalf. Snowflake only allows an identifiable user to do that, so it
-            has to be run by a person whose profile has first name, last name and email set. Run
-            this in a Snowsight worksheet, then have your partner accept their invitation the same
-            way.
-          </Alert>
+          {join.phase === "joined" ? (
+            <Alert kind="info" title="Join accepted — now provisioning">
+              You have been joined as the owner. <code>JOIN</code> is asynchronous, so the table
+              above is the source of truth: wait for every row to read exactly <code>JOINED</code>.{" "}
+              <code>JOINING</code> means still working. Your partner still has to accept their own
+              invitation in their account.
+            </Alert>
+          ) : null}
 
-          <CopyBlock
-            label="Run once as the owner"
-            sql={[
-              "USE ROLE ACCOUNTADMIN;",
-              "USE WAREHOUSE APP_WH;",
-              "USE SECONDARY ROLES NONE;",
-              "",
-              `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('${created}');`,
-              "",
-              "-- Poll until every row reads exactly JOINED (JOINING means still working):",
-              `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('${created}');`,
-            ].join("\n")}
-          />
+          {join.phase === "failed" ? (
+            <>
+              <Alert kind="warn" title="The collaboration was created, but the join failed">
+                Creating and joining are separate steps, and only the second one failed — so the
+                collaboration exists and does not need recreating. The usual causes are a user
+                profile without first name, last name and email, or a missing{" "}
+                <code>SAMOOHA_APP_ROLE</code>. Fix the cause, then either reload this page and use
+                the Invitations screen, or run the SQL below.
+              </Alert>
+              {join.error ? <ErrorPanel error={join.error} raw={join.raw} /> : null}
+              <CopyBlock
+                label="Fallback — run once as the owner"
+                sql={[
+                  "USE ROLE ACCOUNTADMIN;",
+                  "USE WAREHOUSE APP_WH;",
+                  "USE SECONDARY ROLES NONE;",
+                  "",
+                  `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('${created}');`,
+                  "",
+                  "-- Poll until every row reads exactly JOINED (JOINING means still working):",
+                  `CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('${created}');`,
+                ].join("\n")}
+              />
+            </>
+          ) : null}
 
           <div className="hint" style={{ marginTop: 8 }}>
             If the status reaches <code>INSTALLATION_FAILED</code>, read the <code>DETAILS</code>{" "}
-            column. An incomplete user profile and a nested{" "}
-            <code>SYSTEM$ACCEPT_LEGAL_TERMS</code> are the two causes seen in practice. Recover by
-            calling <code>REVIEW</code> again and then <code>JOIN</code> — <code>LEAVE</code> is
-            rejected from that state.
+            column. An incomplete user profile is the cause seen most often. Recover by calling{" "}
+            <code>REVIEW</code> again and then <code>JOIN</code> — <code>LEAVE</code> is rejected
+            from that state.
           </div>
         </Card>
       ) : null}
