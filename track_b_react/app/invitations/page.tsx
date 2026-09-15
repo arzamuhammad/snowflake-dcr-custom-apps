@@ -54,12 +54,20 @@ export default function InvitationsPage() {
     setLoading(true);
     const r = await listCollaborations();
     if (r.ok) {
-      setInvited(r.data.invited);
+      // in_review rows are actionable, not done: a local name has been assigned
+      // but the join has not completed, and DCR refuses every operation until it
+      // reads JOINED. Listing them as "already joined" hides the only button
+      // that can finish them.
+      const actionable = [...r.data.invited, ...r.data.in_review];
+      setInvited(actionable);
       setJoined(r.data.joined);
       setLocalNames((prev) => {
         const next = { ...prev };
-        r.data.invited.forEach((i) => {
-          if (i.source_name && !next[i.source_name]) next[i.source_name] = i.source_name;
+        actionable.forEach((i) => {
+          if (!i.source_name) return;
+          // Once reviewed, the local name is fixed and cannot be changed.
+          if (i.local_name) next[i.source_name] = i.local_name;
+          else if (!next[i.source_name]) next[i.source_name] = i.source_name;
         });
         return next;
       });
@@ -135,11 +143,28 @@ export default function InvitationsPage() {
       {invited.map((inv) => {
         const source = inv.source_name!;
         const local = localNames[source] ?? source;
+        const reviewed = Boolean(inv.local_name);
         return (
           <Card key={source} title={source}>
             <p className="muted" style={{ marginTop: 0 }}>
               From <code>{inv.owner_account}</code>
+              {inv.status ? (
+                <>
+                  {" — "}
+                  <StatusBadge status={inv.status} />
+                </>
+              ) : null}
             </p>
+
+            {reviewed ? (
+              <Alert kind="info" title="Reviewed, but not joined yet">
+                A local name is already assigned, which is why this is not a fresh
+                invitation — but the join has not completed, so DCR will still refuse
+                every operation with <em>“requires the collaboration status to be one
+                of: JOINED”</em>. Click <strong>Review and join</strong> to finish it;
+                the review step is skipped automatically.
+              </Alert>
+            ) : null}
 
             <details>
               <summary>Collaboration spec — read this before joining</summary>
@@ -150,9 +175,14 @@ export default function InvitationsPage() {
               <label>Your local name for this collaboration</label>
               <input
                 value={local}
+                readOnly={reviewed}
                 onChange={(e) => setLocalNames((p) => ({ ...p, [source]: e.target.value }))}
               />
-              <div className="hint">May differ from the name the owner chose.</div>
+              <div className="hint">
+                {reviewed
+                  ? "Fixed at review time and cannot be changed now."
+                  : "May differ from the name the owner chose."}
+              </div>
             </div>
 
             <button className="primary" onClick={() => join(inv)} disabled={busy === source}>

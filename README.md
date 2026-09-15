@@ -242,14 +242,18 @@ Learned the hard way while building this; all of them are handled in the code.
 | Trap | Consequence |
 |---|---|
 | A SAR app needs **caller grants** before it can join | The service only ever gets *restricted* caller's rights, so the caller's privileges are unusable until declared. The failure reads `Unknown user-defined function ...COLLABORATION.REVIEW`, which looks like a missing object, not a missing grant. Fix: `91_grants/grants_caller_rights.sql` |
-| Caller grants go to the **service owner role** | Not to the user, and not `TO APPLICATION` — that form is for Native Apps. `GRANT CALLER USAGE ON DATABASE` alone is also not enough: procedures and functions are separate object types |
+| Caller grants go to the **service owner role** | Not to the user, and not `TO APPLICATION` — that form is for Native Apps. Every object *type* also needs its own grant: `USAGE ON DATABASE` does not cover procedures, and procedures do not cover the state tables DCR reads and writes |
+| `REVIEW` cannot run under caller's rights **at all** | It reads `SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS`, in the `SNOWFLAKE` share. `GRANT CALLER IMPORTED PRIVILEGES` is a syntax error and `GRANT ALL CALLER PRIVILEGES` on that share is a silent no-op, so no amount of granting helps. `REVIEW` is nest-safe, so it goes through the facade; only `JOIN` uses caller's rights |
+| A non-NULL `COLLABORATION_NAME` does **not** mean joined | It is assigned at `REVIEW` for a collaborator and at `INITIALIZE` for the owner. Bucketing on it reports "already joined" for a merely-reviewed collaboration, hides the join button, and every later operation then fails with `requires the collaboration status to be one of: JOINED`. Only `GET_STATUS` is authoritative |
+| `REVIEW` already creates `SFDCR_<collab>` and `SFDCR_LOCAL_<collab>` | So the presence of those objects is not proof of a join either |
 | Joining requires an identifiable *person* | `JOIN` accepts legal terms, so DCR demands `first_name`, `last_name` and `email` on the acting user. An SPCS service identity is not a user object and cannot have them, so the app must join as the **caller** |
 | Owner auto-join via `auto_join_warehouse` only works for a real user | The task inherits the identity that called `INITIALIZE`. From a service identity it cannot accept legal terms; from a person it works. Track B therefore chains an explicit caller's-rights `JOIN` onto create instead |
 | `LEAVE` is rejected from `INSTALLATION_FAILED` | Recover with `REVIEW` again, then `JOIN`. `LEAVE` only works from `LOCAL_DROP_PENDING` / `LEAVING` |
 | Secondary roles are enabled on the session | DCR refuses to register or link data. `USE SECONDARY ROLES NONE` fixes it — but `USE` is barred inside a procedure, so it must be set on the session. Both UIs do this at startup |
 | `COLLABORATION.JOIN` is side-effecting | Cannot run in a stored procedure; must be session level |
 | Auto-join can fail **silently** | Status stays `CREATED` with `auto_join.phase = failed` in `DETAILS`. Read `DETAILS`, not just `STATUS` |
-| A non-NULL `COLLABORATION_NAME` does **not** mean joined | For the owner it is populated at `INITIALIZE`, long before any join. Only `GET_STATUS` tells you the truth |
+| A non-NULL `COLLABORATION_NAME` does **not** mean joined | It is assigned at `REVIEW` for a collaborator and at `INITIALIZE` for the owner. Bucketing on it reports "already joined" for a merely-reviewed collaboration, hides the join button, and every later operation then fails with `requires the collaboration status to be one of: JOINED`. Only `GET_STATUS` is authoritative |
+| `REVIEW` already creates `SFDCR_<collab>` and `SFDCR_LOCAL_<collab>` | So the presence of those objects is not proof of a join either |
 | `SHARED_WITH` is the local/partner discriminator | View-name prefix is *not* reliable — in a single-account test both get `PROVIDER.` |
 | Every collaborator needs a role | `CREATE_COLLABORATION` fails with "collaborators … have no role" |
 | `ADMIN.CHECK_PRIVILEGES` issues a `USE` statement | Also cannot run in a stored procedure |

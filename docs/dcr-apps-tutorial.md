@@ -248,16 +248,18 @@ Tiga hal yang mudah salah:
 
 1. **Penerimanya adalah role pemilik service**, bukan user, dan bukan
    `TO APPLICATION` — bentuk terakhir itu untuk Native App, bukan SAR app.
-2. **`GRANT CALLER USAGE ON DATABASE` saja tidak cukup.** Procedure dan function
-   adalah tipe objek terpisah dan butuh `GRANT INHERITED CALLER USAGE` sendiri.
-   Ini persis yang dikeluhkan pesan error di atas.
+2. **Setiap tipe objek butuh caller grant sendiri.** `GRANT CALLER USAGE ON
+   DATABASE` saja jauh dari cukup, dan Anda akan menemuinya satu error demi satu
+   karena DCR melaporkan objek mana pun yang lebih dulu disentuh:
+   ```
+   Unknown user-defined function ...COLLABORATION.REVIEW           (procedure)
+   Object '...COLLABORATION.COLLABORATION_STATE' does not exist    (table)
+   ```
+   Karena DCR juga **menulis** state-nya sendiri, script memakai
+   `ALL INHERITED CALLER PRIVILEGES`, bukan `SELECT` saja.
 3. **`JOIN` membangun objek nyata**, bukan sekadar update metadata: ia menginstal
-   aplikasi `SFDCR_<collab>`, membuat database `SFDCR_LOCAL_<collab>`, dan
-   merangkai share serta listing. Masing-masing butuh caller grant account-level
-   sendiri (`CREATE APPLICATION`, `CREATE DATABASE`, `CREATE SHARE`,
-   `IMPORT SHARE`, `MANAGE SHARE TARGET`, `CREATE LISTING`,
-   `APPLY ROW ACCESS POLICY`). Kurang satu, `JOIN` gagal di tengah jalan dan
-   meninggalkan kolaborasi dalam status yang `LEAVE` pun menolak.
+   aplikasi, membuat database view lokal, dan merangkai share serta listing.
+   Masing-masing butuh caller grant account-level sendiri.
 
 Verifikasi:
 
@@ -267,8 +269,32 @@ SHOW CALLER GRANTS TO ROLE ACCOUNTADMIN;   -- ganti dengan role pemilik service
 
 > **Catatan keamanan.** Caller grants **tidak memberi privilege baru** — ia hanya
 > membuka privilege yang sudah dimiliki user. Tapi cakupannya adalah **semua**
-> executable milik role itu, bukan hanya app ini. Untuk produksi, sebaiknya
-> service dimiliki role khusus, bukan `ACCOUNTADMIN`.
+> executable milik role itu, bukan hanya app ini, dan `ALL PRIVILEGES` pada
+> seluruh database DCR bukan hal sepele. Untuk produksi, sebaiknya service
+> dimiliki role khusus, bukan `ACCOUNTADMIN`.
+
+#### Batas yang tidak bisa ditembus caller grants
+
+Ada satu hal yang **tidak** bisa diselesaikan dengan caller grants sebanyak apa pun.
+`REVIEW` di dalamnya membaca `SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS`,
+sebuah objek di database share `SNOWFLAKE`. Di bawah restricted caller's rights
+ia gagal dengan:
+
+```
+SQL compilation error: Invalid identifier SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS
+```
+
+Dan objek itu di luar jangkauan caller grants:
+
+| Yang dicoba | Hasil |
+|---|---|
+| `GRANT CALLER IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE` | *syntax error* — bukan caller grant yang valid |
+| `GRANT ALL CALLER PRIVILEGES ON DATABASE SNOWFLAKE` | dilaporkan **sukses**, tapi `SHOW CALLER GRANTS ON DATABASE SNOWFLAKE` mengembalikan **nol baris**. No-op yang menipu |
+
+Karena itu `REVIEW` **tidak dijalankan lewat caller's rights**, melainkan lewat
+façade (owner's rights) — aman, karena `REVIEW` terbukti *nest-safe*. Hanya `JOIN`
+yang benar-benar wajib caller's rights, karena hanya dia yang menerima syarat
+hukum. Aplikasi merangkai keduanya secara otomatis; lihat B2-6.
 
 ### 4.5 Dipasang di kedua akun
 
@@ -491,7 +517,7 @@ track_b_react/                        (~4.280 baris termasuk lib)
 │
 ├── app/api/
 │   ├── facade/route.ts               Proxy ke INVOKE — 29 dari 30 operasi
-│   └── direct/route.ts               HANYA REVIEW + JOIN (lihat B2-6)
+│   └── direct/route.ts               HANYA JOIN (lihat B2-6)
 │
 ├── app/
 │   ├── layout.tsx                    Shell + sidebar
@@ -633,14 +659,33 @@ kosong** — bukan error. Ini pertanyaan support paling sering.
 
 ### B2-6. Kenapa ada dua route API
 
-Ini bukan pilihan gaya arsitektur, tapi konsekuensi teknis:
+Ini bukan pilihan gaya arsitektur, tapi konsekuensi teknis — dan pembagiannya
+lebih halus daripada "satu jalur khusus untuk join":
 
 | Route | Isi | Kenapa |
 |---|---|---|
-| `/api/facade` | 29 dari 30 operasi | Proxy ke `DCR_CONSOLE.APP.INVOKE` |
-| `/api/direct` | **Hanya REVIEW + JOIN** | `JOIN` memanggil `SYSTEM$ACCEPT_LEGAL_TERMS`; Snowflake menolak fungsi ber-*side effect* di dalam stored procedure |
+| `/api/facade` | 29 dari 30 operasi, **termasuk `REVIEW`** | Proxy ke `DCR_CONSOLE.APP.INVOKE`, owner's rights |
+| `/api/direct` | **Hanya `JOIN`** | `JOIN` memanggil `SYSTEM$ACCEPT_LEGAL_TERMS`, yang menuntut user dengan nama dan email — identitas service tidak memenuhinya |
 
-Error aslinya kalau dipaksa lewat façade:
+Jadi satu aksi di UI ("Review and join") melintasi **dua model hak** sekaligus,
+karena masing-masing langkah justru terkunci di model yang lain:
+
+```
+  Klik "Review and join"
+         │
+         ├─► REVIEW  → /api/facade   (owner's rights)
+         │              caller's rights TIDAK bisa: REVIEW membaca
+         │              SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS
+         │
+         └─► JOIN    → /api/direct   (caller's rights)
+                        owner's rights TIDAK bisa: menerima syarat hukum
+```
+
+`lib/facade.ts` yang merangkainya, dan ia menganggap dua error REVIEW sebagai
+wajar lalu lanjut ke JOIN: `CollaborationInvitationNotFound` (kasus owner, yang
+memang tidak punya undangan) dan `CollaborationAlreadyReviewed` (percobaan ulang).
+
+Error asli kalau `JOIN` dipaksa lewat façade:
 
 ```
 090237 (42601): SQL compilation error:
@@ -648,14 +693,22 @@ Query called from a stored procedure contains a function with side effects
 [SYSTEM$ACCEPT_LEGAL_TERMS].
 ```
 
-**Jangan "merapikan" `/api/direct` dengan mengarahkannya ke `INVOKE`** — join akan
-langsung rusak. Alasannya sudah ditulis panjang sebagai komentar di berkas itu
-supaya tidak ada yang tergoda.
+Dan kalau `REVIEW` dipaksa lewat caller's rights:
+
+```
+002004 (42601): SQL compilation error:
+Invalid identifier SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS
+```
+
+**Jangan "merapikan" pembagian ini ke satu route** — arah mana pun akan merusak
+salah satu langkah. Alasannya sudah ditulis panjang sebagai komentar di kedua
+berkas supaya tidak ada yang tergoda.
 
 Ada konsekuensi kepemilikan yang juga penting: **role yang menjalankan JOIN
 memiliki objek yang dibuat join itu** (`SFDCR_<collab>` dan
-`SFDCR_LOCAL_<collab>`). Karena app yang melakukan JOIN, kepemilikan tetap di role
-app dan tidak perlu adopsi grant belakangan.
+`SFDCR_LOCAL_<collab>`). Karena JOIN berjalan sebagai caller, pemiliknya adalah
+**role aktif user**, bukan role app. Kalau keduanya berbeda, operasi berikutnya
+bisa kena error privilege — perbaikannya `91_grants/adopt_joined_collaboration.sql`.
 
 ### B2-7. Development lokal
 
@@ -1161,6 +1214,8 @@ lengkap dengan SQL perbaikannya bila ada. Tabel di bawah untuk rujukan.
 
 | Gejala | Penyebab | Solusi |
 |---|---|---|
+| `Invalid identifier SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS` saat review | `REVIEW` dipaksa lewat caller's rights. Objek itu ada di database share `SNOWFLAKE` dan **tidak bisa** dicakup caller grants | Jalankan `REVIEW` lewat façade (owner's rights) — sudah begitu sejak versi ini. Jangan tambah caller grants, tidak akan menolong |
+| App bilang **"already joined"**, tombol join hilang, lalu Run Overlap gagal dengan `Current status: REVIEWING` | UI menyimpulkan joined dari `COLLABORATION_NAME` yang tidak NULL, padahal kolom itu terisi sejak `REVIEW` | Sudah diperbaiki: status diambil dari `GET_STATUS` dan baris `REVIEWING` masuk daftar yang masih bisa di-join. Untuk yang sudah nyangkut, panggil `JOIN` sekali dari worksheet |
 | `Unknown user-defined function SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW` — disertai kalimat *"runs with restricted caller's rights"* | **Bukan** fungsi yang hilang, dan **bukan** soal `SAMOOHA_APP_ROLE`. Caller grants belum ada, jadi privilege user tidak bisa dipakai app | Jalankan `91_grants/grants_caller_rights.sql` ke role **pemilik service**, lihat §4.4 |
 | `Review and join` gagal padahal user sudah punya `SAMOOHA_APP_ROLE` | Sama seperti di atas — role sudah benar, caller grants yang belum | Idem |
 | `Grant not executed: Insufficient privileges` saat link | Role tidak punya `WITH GRANT OPTION` pada data sumber | Jalankan grant di Bagian A-5 |
@@ -1238,6 +1293,7 @@ Diverifikasi pada DCR **17.5**. Ini menentukan batas façade.
 |---|---|
 | `REGISTER_DATA_OFFERING` * | **`COLLABORATION.JOIN`** — memanggil `SYSTEM$ACCEPT_LEGAL_TERMS` |
 | `INITIALIZE` | **`ADMIN.CHECK_PRIVILEGES`** — menjalankan statement `USE` |
+| **`REVIEW`** — diverifikasi: di dalam procedure ia sampai ke error logika bisnis (`CollaborationAlreadyReviewed`), bukan error resolusi objek | **`USE SECONDARY ROLES NONE`** — statement `USE` |
 | `LINK_DATA_OFFERING`, `LINK_LOCAL_DATA_OFFERING` * | **`USE SECONDARY ROLES NONE`** — statement `USE` |
 | `RUN` (overlap dan aktivasi) | **Auto-join task DCR** — menjalankan JOIN sebagai identitas pemanggil `INITIALIZE`, jadi gagal bila itu identitas service |
 | `VIEW_*` (semua) | |
@@ -1270,6 +1326,27 @@ Yang perlu dicatat: karena JOIN berjalan sebagai caller, **role aktif user itula
 yang memiliki** `SFDCR_<collab>` dan `SFDCR_LOCAL_<collab>`. Kalau role itu
 berbeda dari role app, operasi berikutnya bisa kena error privilege — perbaikannya
 `91_grants/adopt_joined_collaboration.sql`.
+
+### REVIEW justru sebaliknya — harus owner's rights
+
+`REVIEW` nest-safe, jadi ia bisa lewat façade. Dan ia **harus**, karena di bawah
+restricted caller's rights ia gagal permanen: ia membaca
+`SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS`, objek di database share
+`SNOWFLAKE` yang tidak bisa dicakup caller grants (`IMPORTED PRIVILEGES` bukan
+caller grant yang valid; `ALL CALLER PRIVILEGES` pada share itu no-op yang
+dilaporkan sukses).
+
+Jadi kedua langkah terkunci di model yang berlawanan, dan itulah sebabnya satu
+tombol di UI melintasi dua route — lihat B2-6.
+
+### Satu hal yang belum terverifikasi
+
+Apakah `JOIN` sendiri berjalan mulus di bawah restricted caller's rights **belum
+terbukti end-to-end**. Pada saat dokumen ini ditulis, join yang berhasil dilakukan
+lewat worksheet, karena `REVIEW` yang gagal lebih dulu menghalangi pengujiannya.
+Jalur `/api/direct` sudah benar secara rancangan dan menangani kegagalan dengan
+SQL fallback yang jelas, tapi perlakukan ini sebagai bagian yang masih perlu
+dikonfirmasi di akun Anda — bukan sebagai jaminan.
 
 Yang tidak aman harus dijalankan **di level sesi** oleh lapisan UI. Di Streamlit
 in Snowflake ini otomatis. Di React/SPCS, handler API harus memanggil `CALL`

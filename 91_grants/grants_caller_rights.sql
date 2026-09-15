@@ -42,16 +42,43 @@ USE ROLE ACCOUNTADMIN;
 SET owner_role = 'ACCOUNTADMIN';   -- the service owner from SHOW APPLICATION SERVICES
 
 -- --- 1. Reach the DCR API itself -------------------------------------------
--- USAGE on the database and its schemas is not enough on its own: procedures
--- and functions are separate object types and need their own caller grants,
--- which is exactly what the "Unknown user-defined function" error is about.
+-- USAGE on the database and its schemas is not enough on its own: every object
+-- TYPE needs its own caller grant. You will meet them one error at a time
+-- otherwise, because DCR reports whichever object it happened to touch first:
+--
+--   Unknown user-defined function ...COLLABORATION.REVIEW        (procedures)
+--   Object '...COLLABORATION.COLLABORATION_STATE' does not exist (tables)
+--
 -- Granted across the whole database because the API spans several schemas
--- (COLLABORATION, REGISTRY, ADMIN, LIBRARY) and calls between them.
+-- (COLLABORATION, REGISTRY, ADMIN, LIBRARY) and calls between them. ALL
+-- PRIVILEGES rather than SELECT because DCR maintains state: it inserts and
+-- updates its own bookkeeping tables while reviewing and joining.
 
-GRANT CALLER USAGE ON DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+GRANT ALL CALLER PRIVILEGES ON DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
   TO ROLE IDENTIFIER($owner_role);
 
-GRANT INHERITED CALLER USAGE ON ALL SCHEMAS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL SCHEMAS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL TABLES IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL VIEWS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL STAGES IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL STREAMS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL SEQUENCES IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL TASKS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
+  TO ROLE IDENTIFIER($owner_role);
+
+GRANT ALL INHERITED CALLER PRIVILEGES ON ALL FILE FORMATS IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB
   TO ROLE IDENTIFIER($owner_role);
 
 GRANT INHERITED CALLER USAGE ON ALL PROCEDURES IN DATABASE SAMOOHA_BY_SNOWFLAKE_LOCAL_DB

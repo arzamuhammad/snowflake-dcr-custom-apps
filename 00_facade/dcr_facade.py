@@ -520,16 +520,24 @@ def create_collaboration(session, config: dict[str, Any], auto_join_warehouse: s
                 collaboration=config.get("name"), request=config)
 
 
-def list_collaborations(session, ui_track: str = "sql") -> dict[str, Any]:
-    """List collaborations, split into joined and pending invitations.
+def list_collaborations(session, with_status: bool = True, ui_track: str = "sql") -> dict[str, Any]:
+    """List collaborations, split into joined, in-review, and pending invitations.
 
-    A row whose ``COLLABORATION_NAME`` is NULL is a pending invitation: it has
-    been offered but not yet reviewed and joined.
+    ``COLLABORATION_NAME`` is NOT a join indicator, which is the trap this
+    function exists to absorb. It is populated as soon as a local name is
+    assigned, which happens at REVIEW for a collaborator and at INITIALIZE for
+    the owner -- both long before the join completes. Bucketing on it reports
+    "already joined" for a collaboration that is merely reviewed, which then
+    hides the very button the user needs and leaves them stuck at REVIEWING.
+
+    So the status comes from GET_STATUS, for the row describing THIS account.
+    That costs one extra call per named collaboration; pass
+    ``with_status=False`` to skip it when a caller only needs the names.
     """
     def _work() -> dict[str, Any]:
         rows = _rows(session, f"CALL {COLLAB}.VIEW_COLLABORATIONS()")
         me = _scalar(session, "SELECT CURRENT_ORGANIZATION_NAME()||'.'||CURRENT_ACCOUNT_NAME()")
-        joined, invited = [], []
+        joined, in_review, invited = [], [], []
         for r in rows:
             item = {
                 "source_name": r.get("SOURCE_NAME"),
@@ -538,9 +546,35 @@ def list_collaborations(session, ui_track: str = "sql") -> dict[str, Any]:
                 "updated_on": str(r.get("UPDATED_ON")) if r.get("UPDATED_ON") else None,
                 "spec": r.get("COLLABORATION_SPEC"),
                 "is_owner": r.get("OWNER_ACCOUNT") == me,
+                "status": None,
             }
-            (joined if item["local_name"] else invited).append(item)
-        return {"account": me, "joined": joined, "invited": invited}
+
+            if not item["local_name"]:
+                invited.append(item)
+                continue
+
+            if not with_status:
+                joined.append(item)
+                continue
+
+            # GET_STATUS raises if the collaboration is not visible to this role,
+            # which is a status answer of its own rather than a failure to report.
+            try:
+                status_rows = _rows(session, f"CALL {COLLAB}.GET_STATUS(?)", [item["local_name"]])
+            except Exception:
+                status_rows = []
+
+            mine = [s for s in status_rows if s.get("COLLABORATOR_ACCOUNT") == me]
+            item["status"] = str((mine or status_rows or [{}])[0].get("STATUS") or "").upper() or None
+
+            # Match exactly: JOINING and JOINED differ by one letter and by
+            # several minutes of provisioning.
+            if item["status"] == "JOINED":
+                joined.append(item)
+            else:
+                in_review.append(item)
+
+        return {"account": me, "joined": joined, "in_review": in_review, "invited": invited}
 
     return _run(session, "LIST_COLLABORATIONS", _work, ui_track=ui_track)
 

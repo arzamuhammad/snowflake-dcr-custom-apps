@@ -51,7 +51,7 @@ OPERATIONS = {
 
     # -- 2. create collaboration -------------------------------------------
     "CREATE_COLLABORATION":      (f.create_collaboration,       ("config",), ("auto_join_warehouse",)),
-    "LIST_COLLABORATIONS":       (f.list_collaborations,        (), ()),
+    "LIST_COLLABORATIONS":       (f.list_collaborations,        (), ("with_status",)),
     "GET_STATUS":                (f.get_status,                 ("collaboration",), ()),
     "ENSURE_JOINED":             (f.ensure_joined,              ("collaboration",), ()),
 

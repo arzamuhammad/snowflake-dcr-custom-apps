@@ -1,5 +1,5 @@
 /**
- * POST /api/direct — REVIEW + JOIN using the caller's identity.
+ * POST /api/direct — JOIN using the caller's identity.
  *
  * WHY CALLER'S RIGHTS
  * COLLABORATION.JOIN accepts legal terms via SYSTEM$ACCEPT_LEGAL_TERMS.
@@ -12,12 +12,20 @@
  *     ONLY route that uses caller's rights: granting SAMOOHA_APP_ROLE is
  *     necessary for joining, but the facade still protects every other operation.
  *
+ * WHY REVIEW IS NOT HERE
+ * REVIEW used to run here too, and it cannot. A Snowflake App Runtime service
+ * gets *restricted* caller's rights, and REVIEW reads
+ * SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS — an object in the SNOWFLAKE
+ * share that no caller grant can cover, so it fails with "Invalid identifier"
+ * however many grants you add. REVIEW is nest-safe, so it goes through the
+ * facade instead; lib/facade.ts chains the two.
+ *
  * PREREQUISITE
  * Every user who will join through this app needs:
  *   1. SAMOOHA_APP_ROLE granted to their user
  *   2. first_name, last_name, email set on their profile
- * Without these, the error is clear (USER_PROFILE_INCOMPLETE or privilege error)
- * rather than a 504 gateway timeout.
+ * and the service owner role needs the caller grants in
+ * 91_grants/grants_caller_rights.sql.
  *
  * OWNERSHIP CONSEQUENCE
  * The role that runs JOIN owns the created objects (SFDCR_<collab> and
@@ -35,7 +43,6 @@ export const dynamic = "force-dynamic";
 
 /** DCR names are identifiers; reject anything that is not one rather than quoting. */
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const ACCOUNT = /^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$/;
 
 const DCR_DB = "SAMOOHA_BY_SNOWFLAKE_LOCAL_DB";
 
@@ -95,76 +102,25 @@ function fail(code: string, title: string, cause: string, remediation: string, s
 export async function POST(request: Request) {
   const started = Date.now();
 
-  let body: { source_name?: string; owner_account?: string; local_name?: string };
+  let body: { local_name?: string };
   try {
     body = await request.json();
   } catch {
     return fail("INVALID_REQUEST", "Request body is not valid JSON", "Could not parse.", "Reload the page.", 400);
   }
 
-  const source = String(body.source_name ?? "");
-  const owner = String(body.owner_account ?? "");
-  const local = String(body.local_name ?? source);
+  const local = String(body.local_name ?? "");
 
-  if (!NAME.test(source)) {
-    return fail("INVALID_INPUT", "Invalid collaboration name",
-      `'${source}' is not a valid identifier.`,
-      "Use the SOURCE_NAME value shown on the invitation.");
-  }
   if (!NAME.test(local)) {
     return fail("INVALID_INPUT", "Invalid local name",
       `'${local}' is not a valid identifier.`,
       "Use letters, digits and underscores only.");
   }
-  if (!ACCOUNT.test(owner)) {
-    return fail("INVALID_INPUT", "Invalid account identifier",
-      `'${owner}' is not an ORG.ACCOUNT identifier.`,
-      "An account locator or Snowsight URL will not work here.");
-  }
 
   const DCR = `${DCR_DB}.COLLABORATION`;
 
-  // Both REVIEW and JOIN use caller's rights so the person's identity and
-  // profile are visible to DCR.
+  // Caller's rights so the person's identity and profile are visible to DCR.
   const callerOpts = { callersRights: true };
-
-  try {
-    await querySnowflake(`CALL ${DCR}.REVIEW(?, ?, ?)`, {
-      ...callerOpts,
-      binds: [source, owner, local],
-    });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const benign = /already/i.test(message) || /InvitationNotFound/i.test(message);
-    if (!benign) {
-      const noCallerGrants = callerGrantsMissing(message);
-      return NextResponse.json(
-        {
-          ok: false,
-          operation: "JOIN_COLLABORATION",
-          error: {
-            code: noCallerGrants ? "CALLER_GRANTS_MISSING" : "REVIEW_FAILED",
-            title: noCallerGrants
-              ? "The app is not allowed to use your privileges yet"
-              : "Could not review the invitation",
-            cause: message,
-            remediation: noCallerGrants
-              ? CALLER_GRANTS_REMEDIATION
-              : "If a previous Leave was interrupted, the state may be LOCAL_DROP_PENDING — " +
-                "finish it by leaving again, then a fresh invitation reappears.\n\n" +
-                "If the error mentions privileges: the user joining needs SAMOOHA_APP_ROLE. " +
-                "Grant it with: GRANT ROLE SAMOOHA_APP_ROLE TO USER <username>;",
-            sql_fix: noCallerGrants ? CALLER_GRANTS_SQL : null,
-            retryable: true,
-            severity: noCallerGrants ? "blocked" : "error",
-          },
-          error_raw: message,
-          duration_ms: Date.now() - started,
-        },
-        { status: 200 },
-      );
-    }
-  }
 
   try {
     await querySnowflake(`CALL ${DCR}.JOIN(?)`, { ...callerOpts, binds: [local] });

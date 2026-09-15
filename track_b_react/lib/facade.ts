@@ -215,31 +215,58 @@ export const setAppRole = (username: string, app_role: string, notes?: string) =
 // ---------------------------------------------------------------------------
 
 /**
- * REVIEW then JOIN, executed at session level.
+ * REVIEW then JOIN, as one user-visible action, but over TWO different rights
+ * models — because each step is blocked under the other one.
  *
- * JOIN installs the clean room application, which calls
- * SYSTEM$ACCEPT_LEGAL_TERMS. Snowflake refuses side-effecting functions inside a
- * stored procedure, so this bypasses DCR_CONSOLE.APP.INVOKE by design.
+ * REVIEW goes through the FACADE (owner's rights). It cannot use caller's rights:
+ * a Snowflake App Runtime service only ever gets *restricted* caller's rights,
+ * and REVIEW reads SNOWFLAKE.INFORMATION_SCHEMA.AVAILABLE_LISTINGS, an object in
+ * the SNOWFLAKE share that caller grants cannot cover at all. IMPORTED
+ * PRIVILEGES is not a valid caller grant, and GRANT ALL CALLER PRIVILEGES on the
+ * share silently grants nothing. Under restricted caller's rights REVIEW
+ * therefore fails with "Invalid identifier ...AVAILABLE_LISTINGS", no matter how
+ * many caller grants are added. REVIEW is nest-safe, so the facade is fine.
  *
- * Runs under CALLER'S rights, because accepting legal terms additionally requires
- * the acting user to have first_name, last_name and email. Owner's rights acts as
- * an SPCS managed service identity, which is not a user object and cannot be
- * given a profile, so joining can never work there.
+ * JOIN goes through /api/direct (caller's rights). It cannot use owner's rights:
+ * it accepts legal terms, which requires an acting user with first_name,
+ * last_name and email, and the service identity is not a user object at all.
  *
- * Used by the Invitations page and, for the owner, chained onto Create
- * Collaboration. The owner has no invitation, so REVIEW fails with
- * InvitationNotFound; /api/direct treats that as benign and proceeds to JOIN.
+ * The caller must hold SAMOOHA_APP_ROLE and a complete profile, and the service
+ * owner role needs the caller grants in 91_grants/grants_caller_rights.sql.
  *
- * The caller must hold SAMOOHA_APP_ROLE and a complete profile. JOIN is
- * asynchronous: a successful response means provisioning started, so confirm the
- * terminal state with GET_STATUS.
+ * The owner has no invitation to review, so REVIEW returns
+ * CollaborationInvitationNotFound; that is treated as benign here, as is
+ * CollaborationAlreadyReviewed on a retry.
  *
- * Consequence worth knowing: the role that runs JOIN OWNS the
- * objects the join creates (SFDCR_<collab> and SFDCR_LOCAL_<collab>), which
- * determines who can link and run later.
+ * JOIN is asynchronous: a success means provisioning started, not finished.
+ * Confirm the terminal state with getStatus — and match "JOINED" exactly, since
+ * "JOINING" contains it.
+ *
+ * Consequence worth knowing: the role that runs JOIN OWNS the objects the join
+ * creates (SFDCR_<collab> and SFDCR_LOCAL_<collab>), which determines who can
+ * link and run later.
  */
-export const reviewAndJoin = (args: {
+export async function reviewAndJoin(args: {
   source_name: string;
   owner_account: string;
   local_name: string;
-}) => post<{ joined: boolean; status: Record<string, unknown>[] }>("/api/direct", args);
+}) {
+  const review = await invoke<{ review: Record<string, unknown>[] }>("REVIEW_COLLABORATION", {
+    source_name: args.source_name,
+    owner_account: args.owner_account,
+    local_name: args.local_name,
+  });
+
+  if (!review.ok) {
+    const blob = `${review.error?.cause ?? ""} ${review.error_raw ?? ""}`;
+    const benign = /already/i.test(blob) || /InvitationNotFound/i.test(blob);
+    if (!benign) return review as unknown as FacadeResult<JoinResult>;
+  }
+
+  return post<JoinResult>("/api/direct", { local_name: args.local_name });
+}
+
+interface JoinResult {
+  joined: boolean;
+  status: Record<string, unknown>[];
+}

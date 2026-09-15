@@ -105,17 +105,32 @@ export interface ListDataObjectsData {
 
 export interface CollaborationSummary {
   source_name: string | null;
-  /** NULL means a pending invitation that has not been reviewed and joined. */
+  /**
+   * NULL means a pending invitation that has not been reviewed yet.
+   *
+   * A non-NULL value does NOT mean joined. It is assigned at REVIEW for a
+   * collaborator and at INITIALIZE for the owner, both before the join finishes.
+   * Use `status` for that.
+   */
   local_name: string | null;
   owner_account: string | null;
   updated_on: string | null;
   spec: string | null;
   is_owner: boolean;
+  /** From GET_STATUS, for this account's row. NULL when not looked up. */
+  status: string | null;
 }
 
 export interface ListCollaborationsData {
   account: string;
   joined: CollaborationSummary[];
+  /**
+   * Reviewed but not yet JOINED. A separate bucket on purpose: a local name is
+   * assigned at REVIEW, so these look joined if you only check the name, and the
+   * UI would then hide the join action while DCR still refuses every operation
+   * with "requires the collaboration status to be one of: JOINED".
+   */
+  in_review: CollaborationSummary[];
   invited: CollaborationSummary[];
 }
 
